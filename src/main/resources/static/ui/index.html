@@ -1,0 +1,2856 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>LLM Gateway 管理台</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1419; --card:#161d27; --border:#243042; --text:#dbe4ef; --dim:#7b8ba3; --ok:#3fb96b; --warn:#e6b450; --err:#e05c5c; --accent:#4d9fff; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:"Segoe UI",system-ui,sans-serif; background:var(--bg); color:var(--text); padding:16px 20px; font-size:14px; }
+  h1 { font-size:19px; margin-bottom:12px; display:flex; align-items:center; gap:10px; }
+  h1 .dot { width:10px; height:10px; border-radius:50%; background:var(--ok); }
+  .tabs { display:flex; gap:4px; margin-bottom:14px; border-bottom:1px solid var(--border); }
+  .tab { padding:8px 18px; cursor:pointer; color:var(--dim); border-bottom:2px solid transparent;
+         transition:color .12s, transform .06s; user-select:none; }
+  .tab:hover { color:var(--text); }
+  .tab:active { transform:scale(.96); color:var(--accent); }
+  .tab.active { color:var(--text); border-bottom-color:var(--accent); }
+  .toolbar { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
+  .btn { background:var(--accent); color:#fff; border:none; border-radius:6px; padding:5px 14px; cursor:pointer; font-size:12px;
+         transition:transform .06s ease, filter .06s ease, opacity .15s ease; user-select:none; }
+  .btn:hover { filter:brightness(1.18); }
+  .btn:not(:disabled):active { transform:translateY(1px) scale(.95); filter:brightness(.8); }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .btn.busy { opacity:.55; cursor:progress; }
+  .btn.warn { background:var(--warn); color:#222; }
+  .btn.err { background:var(--err); }
+  .btn.err:not(:disabled):active { filter:brightness(.7); }
+  .btn.ghost { background:transparent; border:1px solid var(--border); color:var(--text); }
+  .btn.ghost:hover { border-color:var(--accent); }
+  .btn.mini { padding:2px 9px; font-size:11px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:14px; }
+  .card h3 { font-size:14px; margin-bottom:10px; color:var(--accent); display:flex; justify-content:space-between; align-items:center; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(400px,1fr)); gap:12px; }
+  .row { display:flex; justify-content:space-between; align-items:center; gap:6px; padding:4px 0; border-bottom:1px dashed var(--border); }
+  .row:last-child { border:none; }
+  .dim { color:var(--dim); }
+  .tag { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; white-space:nowrap; }
+  .chip { display:inline-block; padding:2px 10px; border-radius:12px; font-size:12px; border:1px solid var(--border); cursor:pointer; user-select:none; }
+  .chip.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .tag.ok { background:rgba(63,185,107,.15); color:var(--ok); }
+  .tag.warn { background:rgba(230,180,80,.15); color:var(--warn); }
+  .tag.err { background:rgba(224,92,92,.15); color:var(--err); }
+  .tag.cap { background:rgba(77,159,255,.12); color:var(--accent); }
+  .tag.dim { background:rgba(120,140,170,.10); color:var(--dim); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  th { color:var(--dim); font-weight:500; position:sticky; top:0; background:var(--card); }
+  th.sortable { cursor:pointer; user-select:none; }
+  th.sortable:hover { color:var(--text); }
+  th .sc { display:inline-block; width:1em; color:var(--accent); }
+  select, input { background:var(--card); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:5px 10px; font-size:13px; }
+  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; z-index:10; }
+  .modal { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:18px 22px; width:min(720px,94vw); max-height:90vh; overflow:auto; }
+  .modal h3 { color:var(--accent); margin-bottom:12px; font-size:15px; }
+  .modal.wide { width:min(1240px,96vw); }
+  /* 评分因子 chips：默认只露数值，被降权的（<1）染色，一眼看出是谁把分数拉下来的 */
+  .fchip { display:inline-block; padding:1px 7px; margin:2px 5px 2px 0; border:1px solid var(--border);
+    border-radius:5px; font-size:11.5px; color:var(--dim); background:rgba(120,140,170,.07); white-space:nowrap; }
+  .fchip b { color:var(--text); font-weight:600; }
+  .fchip.low { border-color:var(--warn); color:var(--warn); background:rgba(230,180,80,.08); }
+  .fchip.low b { color:var(--warn); }
+  .fchip.zero { border-color:var(--err); color:var(--err); background:rgba(224,92,92,.10); }
+  .fchip.zero b { color:var(--err); }
+  .sbar { position:relative; height:9px; border-radius:5px; background:rgba(120,140,170,.14); overflow:hidden; min-width:80px; }
+  .sbar i { position:absolute; left:0; top:0; bottom:0; border-radius:5px; background:var(--accent); }
+  .sbar.pick i { background:var(--ok); }
+  .form-row { display:flex; align-items:center; gap:8px; margin-bottom:4px; }
+  .form-row label { width:110px; color:var(--dim); font-size:13px; flex-shrink:0; }
+  .form-row input, .form-row select { flex:1; min-width:0; }
+  .form-row input[type=checkbox] { flex:0 0 auto; width:16px; height:16px; accent-color:var(--accent); cursor:pointer; }
+  .form-row .ck { display:flex; align-items:center; gap:7px; font-weight:400; color:var(--text); flex:1; cursor:pointer; }
+  .fhint { font-size:12px; color:var(--dim); line-height:1.5; margin:0 0 11px 118px; }
+  .form-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:14px; }
+  #toast { position:fixed; right:20px; top:20px; background:var(--ok); color:#fff; padding:10px 18px; border-radius:8px;
+           display:none; z-index:99; max-width:420px; box-shadow:0 6px 24px rgba(0,0,0,.4);
+           align-items:center; gap:8px; animation:toastIn .18s ease; }
+  #toast.show { display:flex; }
+  #toast.err { background:var(--err); }
+  @keyframes toastIn { from { opacity:0; transform:translateY(-8px); } to { opacity:1; transform:none; } }
+  .mrow { display:flex; align-items:center; gap:6px; padding:5px 6px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px;
+          transition:background .15s, border-color .15s; }
+  .mrow:hover { background:rgba(77,159,255,.06); border-color:#34537a; }
+  .card { transition:border-color .15s; }
+  .card:hover { border-color:#2e4258; }
+  select:hover, input:hover { border-color:#34537a; }
+  #globalBar { position:fixed; left:0; top:0; height:3px; width:0; background:linear-gradient(90deg,var(--accent),#9cd0ff);
+               z-index:100; transition:width .25s ease, opacity .3s ease; opacity:0; }
+  #globalBar.active { opacity:1; animation:barPulse 1.1s ease-in-out infinite; }
+  @keyframes barPulse { 0%,100% { filter:brightness(.85); } 50% { filter:brightness(1.3); } }
+  .bar { height:8px; background:var(--border); border-radius:4px; overflow:hidden; margin-top:4px; }
+  .bar .fill { height:100%; background:var(--accent); transition:width .3s ease; }
+  .mrow { display:flex; align-items:center; gap:6px; padding:5px 6px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; }
+  .mrow .mname { font-weight:600; word-break:break-all; }
+  .mrow .mops { display:flex; gap:4px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
+  .mrow .mtags { display:flex; gap:4px; align-items:center; flex-wrap:wrap; }
+  .testbox { margin:8px 0 2px; border:1px solid var(--border); border-radius:6px; padding:8px; background:rgba(77,159,255,.05); }
+  .testbox .out { white-space:pre-wrap; word-break:break-all; max-height:200px; overflow:auto; margin-top:6px; font-size:13px; }
+  /* ---- 多选下拉筛选（msel）---- */
+  .msel { position:relative; display:inline-block; }
+  .msel .msel-btn { background:var(--card); color:var(--text); border:1px solid var(--border); border-radius:6px;
+                    padding:5px 10px; font-size:13px; cursor:pointer; display:inline-flex; align-items:center; gap:6px; max-width:230px; }
+  .msel .msel-btn:hover { border-color:#34537a; }
+  .msel .msel-btn .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .msel .msel-btn .cnt { background:var(--accent); color:#fff; border-radius:9px; padding:0 6px; font-size:11px; flex-shrink:0; }
+  .msel .msel-btn .cnt.zero { background:transparent; color:var(--dim); }
+  .msel .msel-panel { display:none; position:absolute; top:calc(100% + 4px); left:0; z-index:30; min-width:210px; max-width:320px;
+                      max-height:280px; overflow:auto; background:var(--card); border:1px solid var(--border); border-radius:8px;
+                      padding:6px; box-shadow:0 8px 26px rgba(0,0,0,.5); }
+  .msel.open .msel-panel { display:block; }
+  .msel .opt { display:flex; align-items:center; gap:8px; padding:4px 8px; border-radius:6px; cursor:pointer;
+               font-size:13px; word-break:break-all; user-select:none; }
+  .msel .opt:hover { background:rgba(77,159,255,.08); }
+  .msel .opt .box { width:14px; height:14px; border:1px solid var(--border); border-radius:4px; flex-shrink:0;
+                    display:inline-flex; align-items:center; justify-content:center; font-size:11px; color:#fff; }
+  .msel .opt.on .box { background:var(--accent); border-color:var(--accent); }
+  .msel .opt.on .box::after { content:'✓'; }
+  .msel .msel-head { display:flex; gap:8px; padding:2px 4px 6px; border-bottom:1px solid var(--border); margin-bottom:4px;
+                     position:sticky; top:0; background:var(--card); }
+  .msel .msel-head .btn { flex:1; }
+</style>
+</head>
+<body>
+<div id="globalBar"></div>
+<h1><span class="dot"></span>LLM Gateway 管理台 <span class="dim" style="font-size:13px" id="meta"></span></h1>
+
+<div class="tabs">
+  <div class="tab active" data-tab="providers" onclick="switchTab('providers')">供应商</div>
+  <div class="tab" data-tab="usage" onclick="switchTab('usage')">用量统计</div>
+  <div class="tab" data-tab="logs" onclick="switchTab('logs')">请求日志</div>
+  <div class="tab" data-tab="sys" onclick="switchTab('sys')">系统</div>
+</div>
+
+<!-- ===================== 供应商 TAB ===================== -->
+<div id="tab-providers">
+  <div class="toolbar">
+    <button class="btn" onclick="openProviderForm()">+ 新增供应商</button>
+    <button class="btn ghost" onclick="withBusy(this,'刷新中…',()=>loadAll(true))">刷新</button>
+    <button class="btn ghost" id="rkOpenBtn" onclick="openRankModal()" title="看每个模型的综合评分、被谁拉下来，以及流量实际有没有分到各家">评分与分摊</button>
+    <span class="dim">模型清单只信手工配置（增删即生效，不被上游目录覆盖）· 工具侧只需配置组名 free-fast 即可用全部模型</span>
+  </div>
+  <div class="grid" id="providerCards"></div>
+
+  <div class="card">
+    <h3>虚拟模型分组（请求组名即在组内按优先级+策略选路）<button class="btn mini" onclick="openGroupForm()">+ 新增/修改分组</button></h3>
+    <table><thead><tr><th>组名</th><th>类型</th><th>成员</th><th></th></tr></thead><tbody id="groupBody"></tbody></table>
+    <div class="dim" style="font-size:12px;margin-top:6px">自动组 = 动态包含所有供应商的全部手工配置模型（增删模型自动同步，无需维护成员表）</div>
+  </div>
+</div>
+
+<!-- ===================== 用量 TAB ===================== -->
+<div id="tab-usage" style="display:none">
+  <div class="toolbar">
+    <span class="dim">从</span><input type="date" id="usageFrom" onchange="loadUsage()" title="开始日期（可单选）">
+    <span class="dim">到</span><input type="date" id="usageTo" onchange="loadUsage()" title="结束日期（可单选）">
+    <div class="msel" id="umsel_provider" data-param="providers" data-dim="usage_provider" data-ph="供应商" data-refresh="loadUsage"></div>
+    <div class="msel" id="umsel_model" data-param="models" data-dim="usage_model" data-ph="真实模型" data-refresh="loadUsage"></div>
+    <div class="msel" id="umsel_client" data-param="clients" data-dim="usage_client" data-ph="来源工具" data-refresh="loadUsage"></div>
+    <button class="btn ghost" onclick="usageQuick(-6)">近7天</button>
+    <button class="btn ghost" onclick="usageQuick(-29)">近30天</button>
+    <button class="btn ghost" onclick="usageQuick(0)">今天</button>
+    <button class="btn ghost" onclick="withBusy(this,'加载中…',()=>loadUsage())">刷新</button>
+    <button class="btn ghost" onclick="usageClear(this)" title="清空日期与供应商/模型/工具过滤">清空条件</button>
+    <span class="dim" id="usageRangeHint"></span>
+  </div>
+  <div class="card" id="lbCard">
+    <h3><span>分摊健康度（近 <span id="lbSumDays">3</span> 天：实际调用 vs 评分应得）</span>
+      <button class="btn mini ghost" id="lbBtn" onclick="loadUsageBalance(this)">刷新</button>
+      <button class="btn mini" data-hact="rkBalOpen" data-h="${hx({})}">打开分摊对照</button></h3>
+    <div class="dim" id="lbSummary" style="font-size:12px;line-height:1.7">读取中…</div>
+  </div>
+  <div class="card"><h3>接入工具用量（请求总次数 / 成功次数 / Token 消耗）</h3>
+    <table><thead><tr><th>工具</th><th>请求总次数</th><th>成功次数</th><th>失败次数</th><th>输入Token</th><th>输出Token</th><th>合计Token</th></tr></thead>
+    <tbody id="clientUsageBody"></tbody>
+    <tfoot id="clientUsageFoot" style="color:var(--accent); font-weight:600"></tfoot></table>
+  </div>
+  <div class="card"><h3>供应商 × 模型 用量汇总（请求总次数 / 成功次数 / Token 消耗）</h3>
+    <table><thead><tr><th>供应商</th><th>模型</th><th>请求总次数</th><th>成功次数</th><th>失败次数</th><th>输入Token</th><th>输出Token</th><th>合计Token</th></tr></thead>
+    <tbody id="usageBody"></tbody>
+    <tfoot id="usageFoot" style="color:var(--accent); font-weight:600"></tfoot></table>
+  </div>
+  <div class="card"><h3><span>按 Key（渠道）用量（一家多把 Key 时，每把分别扛了多少）</span>
+    <button class="btn mini ghost" onclick="loadKeyUsage()">刷新</button></h3>
+    <div class="dim" id="keyScope" style="font-size:12px;line-height:1.7;margin:2px 0 6px">读取中…</div>
+    <table><thead><tr><th>供应商</th><th>模型</th><th title="渠道 id；括号内是掩码后的 Key 尾号，便于区分同一家多把 Key">Key</th><th title="Key 权重/是否启用（配置里改）">配置</th><th>请求</th><th>占比</th><th>成功</th><th>失败</th><th title="error_class=RATE_LIMIT 的次数（近 5 分钟密度只用于评分，这里是窗口内累计）">撞429</th><th>输入Token</th><th>输出Token</th><th title="窗口内成功请求 TTFT 的中位数">TTFT中位</th><th>今日Token/预算</th><th>冷却</th></tr></thead>
+    <tbody id="keyUsageBody"></tbody>
+    <tfoot id="keyUsageFoot" style="color:var(--accent); font-weight:600"></tfoot></table>
+  </div>
+  <div class="card"><h3>日趋势</h3>
+    <table><thead><tr><th>日期</th><th>请求数</th><th>失败</th><th>失败率</th><th>Token</th><th>水位</th></tr></thead><tbody id="byDayBody"></tbody></table>
+  </div>
+</div>
+
+<!-- ===================== 日志 TAB ===================== -->
+<div id="tab-logs" style="display:none">
+  <div class="toolbar">
+    <span class="dim">从</span><input type="date" id="logFrom" onchange="logQuery()" title="开始日期（可单选）">
+    <span class="dim">到</span><input type="date" id="logTo" onchange="logQuery()" title="结束日期（可单选）">
+    <div class="msel" id="msel_model" data-param="modelsIn" data-dim="model_req" data-ph="请求模型名(工具侧)"></div>
+    <div class="msel" id="msel_realModel" data-param="realModelsIn" data-dim="model_real" data-ph="真实模型(上游)"></div>
+    <div class="msel" id="msel_provider" data-param="providersIn" data-dim="provider_id" data-ph="供应商"></div>
+    <div class="msel" id="msel_client" data-param="clientsIn" data-dim="client" data-ph="来源工具"></div>
+    <div class="msel" id="msel_key" data-param="channelsIn" data-dim="channel_id" data-ph="Key(渠道)" title="按 Key 过滤：只列出带 Key 归属的请求（本功能上线前的历史请求无归属，任何 Key 选项都不会包含它们）"></div>
+    <span id="statusChips" style="display:flex;gap:4px;flex-wrap:wrap">
+      <span class="chip" data-v="OK" onclick="toggleChip(this)">成功</span>
+      <span class="chip" data-v="FAILED" onclick="toggleChip(this)">失败</span>
+      <span class="chip" data-v="STREAM_TIMEOUT" onclick="toggleChip(this)">超时掐断</span>
+      <span class="chip" data-v="STREAM_ABORTED" onclick="toggleChip(this)">中断</span>
+      <span class="chip" data-v="REJECTED" onclick="toggleChip(this)">网关拒绝</span>
+      <span class="chip" data-v="CLIENT_ABORTED" onclick="toggleChip(this)">客户端断连</span>
+    </span>
+    <button class="btn ghost" onclick="withBusy(this,'查询中…',()=>logQuery())">查询</button>
+    <button class="btn ghost" onclick="loadLogs0(this)">清空过滤</button>
+    <button class="btn ghost" onclick="exportLogsCsv(this)" title="导出当前过滤条件下的全部日志（非本页）为 CSV">导出CSV</button>
+  </div>
+  <div class="card" style="padding:7px 10px;margin-bottom:8px;font-size:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <span id="logPerf" class="dim">本页自测：初始化中…</span>
+    <button class="btn mini ghost" onclick="copyPerfDiag(this)" title="复制最近 20 次链路点击与整表渲染的分项耗时（网络/DOM/绘制/长任务/视口），反馈卡顿时贴给我即可定位">复制诊断</button>
+    <button class="btn mini ghost" onclick="selfTestFetch(this)" title="不用等尖峰，立刻跑七臂对照（每臂一条唯一路径，事后拿它去网关的计时台账里对账）：单发一条本页 fetch，再并发六条——本页×绕缓存、本页×默认缓存、干净 iframe×绕缓存、干净 iframe×默认缓存（iframe 内容脚本注不进来，必是原生）、XMLHttpRequest、静态资源。差值只在并发组内两两比、每只差一个维度：「realm 差」=本页比干净 realm 多花，「写缓存差」=默认比绕过缓存多花，「并发比单发多」=有没有共用的闸门。「网关答完→页面拿到」「请求发出→网关开始答」「收完→JS 拿到」是同一台机器上两个时刻的绝对差，直接回答『时间到底出在网关之外还是之内、卡在发送侧还是交付侧』。各项都小却仍卡 = 尖峰是间歇的，卡的时候再按一次。">瓶颈对照测试</button>
+  </div>
+  <div class="card">
+    <table><thead><tr>
+      <th class="sortable" onclick="sortLogs('time')">时间<span class="sc" id="sc_time"></span></th>
+      <th class="sortable" onclick="sortLogs('client')">来源工具<span class="sc" id="sc_client"></span></th>
+      <th class="sortable" onclick="sortLogs('model')">请求模型<span class="sc" id="sc_model"></span></th>
+      <th class="sortable" onclick="sortLogs('provider')">供应商/真实模型<span class="sc" id="sc_provider"></span></th>
+      <th class="sortable" onclick="sortLogs('key')" title="这一发实际用的哪把 Key（渠道）。空＝Key 归属功能上线之前的历史请求">Key<span class="sc" id="sc_key"></span></th>
+      <th class="sortable" onclick="sortLogs('ttft')">TTFT<span class="sc" id="sc_ttft"></span></th>
+      <th class="sortable" onclick="sortLogs('total')">总耗时<span class="sc" id="sc_total"></span></th>
+      <th class="sortable" onclick="sortLogs('tokens')">tokens<span class="sc" id="sc_tokens"></span></th>
+      <th class="sortable" onclick="sortLogs('status')">状态<span class="sc" id="sc_status"></span></th>
+      <th class="sortable" onclick="sortLogs('attempts')">尝试<span class="sc" id="sc_attempts"></span></th>
+      <th>错误</th><th>链路</th><th title="压缩路径/请求画像：判断'早停是否压缩引起'的落库证据">证据</th>
+    </tr></thead>
+    <tbody id="logBody"></tbody>
+    <tfoot id="logFoot" style="color:var(--accent); font-weight:600"></tfoot></table>
+    <div class="toolbar" style="margin-top:8px">
+      <span class="dim" id="logPageInfo"></span>
+      <button class="btn mini ghost" id="logPrevBtn" onclick="logPage(-1)">上一页</button>
+      <button class="btn mini ghost" id="logNextBtn" onclick="logPage(1)">下一页</button>
+      <span class="dim">每页</span>
+      <select id="logLimit" onchange="_logLimit=+this.value;_logOffset=0;loadLogs()">
+        <option value="100">100</option><option value="200">200</option><option value="500">500</option>
+      </select>
+    </div>
+    <div class="dim" style="font-size:12px;margin-top:6px">合计行为当前过滤条件下的全量统计（不受本页限制）；日期只填一边即单边过滤；点表头排序</div>
+  </div>
+</div>
+
+<!-- ===================== 系统 TAB ===================== -->
+<div id="tab-sys" style="display:none">
+  <div class="card">
+    <h3>选路策略</h3>
+    <div class="toolbar">
+      <select id="strategy">
+        <option value="auto">auto（综合，默认）</option>
+        <option value="priority">priority（严格优先级）</option>
+        <option value="latency">latency（速度优先）</option>
+        <option value="weighted">weighted（加权随机）</option>
+        <option value="cost-first">cost-first（费用优先）</option>
+        <option value="free-only">free-only（只走免费模型，允许失败不付费兜底）</option>
+        <option value="paid-only">paid-only（只走付费模型，快/稳/准，不看成本）</option>
+      </select>
+      <button class="btn" onclick="setStrategy(this)">保存并生效</button>
+    </div>
+    <div class="toolbar" style="margin-top:10px;padding-top:8px;border-top:1px dashed rgba(128,128,128,.35)">
+      <span class="dim" style="font-size:12px">速带分摊（auto/priority/free-only 生效）：从分数最高的一小"速带"里加权抽签，速度相近时把流量摊给多家，避免独刷一家撞限流</span>
+      <button class="btn ghost" id="lsBtn" onclick="toggleLoadShare(this)">读取中</button>
+      <span class="dim" style="font-size:12px">带宽</span>
+      <input id="lsBand" type="number" min="2" max="10" style="width:60px">
+      <span class="dim" style="font-size:12px">慢阈值ms(≥1000)</span>
+      <input id="lsSlow" type="number" min="1000" max="60000" step="500" style="width:80px">
+      <button class="btn mini ghost" onclick="saveLoadShareParams(this)">保存参数</button>
+      <span id="lsHint" class="dim" style="font-size:12px"></span>
+    </div>
+    <div class="dim" style="font-size:12px">评分 = 优先级 × 健康度 × 首字速度 × 吞吐 × 费用档 × 语义匹配 × 限流压力 × 工具弱 × 早停嫌疑（各因子平滑降权，永不剔除唯一候选）</div>
+  </div>
+  <div class="card">
+    <h3>运行时状态（熔断 / 冷却 / EWMA）</h3>
+    <table><thead><tr><th>供应商</th><th>模型</th><th>状态</th><th>首字延迟</th><th title="最近首字中位数（抗尖峰，选举主要看这个）">中位首字</th><th>出字速度</th><th>连续失败</th><th>最近错误</th></tr></thead>
+    <tbody id="runtimeBody"></tbody></table>
+  </div>
+  <div class="card" id="earlyStopCard" style="display:none">
+    <h3>早停惩罚中（client×模型被临时降权）</h3>
+    <table><thead><tr><th>来源工具</th><th>供应商</th><th>模型</th><th>剩余惩罚</th></tr></thead>
+    <tbody id="earlyStopBody"></tbody></table>
+    <div class="dim" style="font-size:12px;margin-top:6px">该工具近期在此模型上出现早停/空回/不合法输出，网关在惩罚窗口内降低其权重（自动过期恢复，非熔断）——排障"为什么这家突然排后"看这里</div>
+  </div>
+  <div class="card" id="clientQueueCard" style="display:none">
+    <h3>同源并发队列（诊断）
+      <button class="btn mini ghost" onclick="renderClientQueue(true)">刷新</button></h3>
+    <div class="dim" id="cqMeta" style="font-size:12px;margin-bottom:6px"></div>
+    <table><thead><tr><th>来源工具</th><th>并发上限</th><th>排队中</th></tr></thead>
+    <tbody id="cqBody"></tbody></table>
+    <div class="dim" style="font-size:12px;margin-top:6px">同一工具并发超上限时后续请求排队等待（防免费上游被打爆），等待超时则快速失败换家</div>
+  </div>
+  <div class="card">
+    <h3>压缩链路一键体检（上游探测 + 压缩干跑 + 工具调用测试）
+      <button class="btn mini" id="scBtn" onclick="selfCheckRun(this)">开始体检</button></h3>
+    <div id="scBody" class="dim" style="font-size:12px">体检串行执行约 1~2 分钟，全程 client 隔离（不污染选举/预算/熔断、网关照常服务）。用于发现"压缩链路被配坏却日志全绿"这类静默回归（复刻 2a 事故的发现路径）。</div>
+  </div>
+  <div class="card">
+    <h3>toolWeak 自动学习建议（半自动：攒够样本出建议，你确认才打标）
+      <button class="btn mini ghost" id="twBtn" onclick="loadToolWeakSuggestions(this)">刷新</button></h3>
+    <div id="twBody" class="dim" style="font-size:12px">统计各模型"带 tools 请求"样本：累计达阈值且从未真实回过 tool_calls 的模型在此列出为建议。<b>只建议、绝不自动改配置</b>——点"标记 toolWeak"才写回（该模型带工具请求会被排后，不剔除）。重启后样本清零，攒样很快。</div>
+  </div>
+  <div class="card">
+    <h3>模型定时巡检（探测空闲模型的健康与首字速度，只探免费模型）
+      <button class="btn mini" onclick="probeRun(this)">立即巡检一轮</button></h3>
+    <table><thead><tr><th>供应商</th><th>模型</th><th>结果</th><th>首字</th><th>耗时</th><th>tokens</th><th>错误</th></tr></thead>
+    <tbody id="probeBody"></tbody></table>
+    <div class="dim" style="font-size:12px;margin-top:6px" id="probeMeta"></div>
+  </div>
+  <div class="card">
+    <h3>模型自动停用 / 恢复（定时对账上游：确认“模型不存在”自动停用、“余额不足”临时停用、重新可用自动恢复）
+      <button class="btn mini" onclick="reconcileRun(this)">立即扫描一轮</button>
+      <button class="btn mini ghost" id="rcBtn" onclick="toggleReconcile(this)">读取中</button></h3>
+    <div class="dim" style="font-size:12px;margin-bottom:8px">
+      默认<b>关闭</b>。开启后每隔一段时间实时拉各上游 <code>/models</code> 列表并核对本地模型：<b>列表查不到 ≠ 停用</b>——
+      必先补发一条“确认探测”，探测确实报“模型不存在”才<b>永久停用</b>（写配置、可撤销）；报“余额/额度不足”只<b>临时停用</b>（内存态，次日或调通自动解除）。
+      像智谱这种“列表查不到但实际能调”的模型，确认探测会成功 → 不动。人工停用的模型永不自动恢复，仅恢复本器自动停用过的。
+      探测走 <code>client=reconcile</code> 隔离，不污染熔断/评分；有真实流量时自动让路。</div>
+    <div class="toolbar" style="margin-bottom:8px">
+      <span class="dim" style="font-size:12px">扫描间隔(分,0=关)</span>
+      <input id="rcInterval" type="number" min="0" max="1440" style="width:64px">
+      <span class="dim" style="font-size:12px">触发确认的失败次数</span>
+      <input id="rcMinFail" type="number" min="1" max="20" style="width:56px">
+      <span class="dim" style="font-size:12px">每轮探测预算(个)</span>
+      <input id="rcBudget" type="number" min="0" max="50" style="width:56px">
+      <button class="btn mini ghost" onclick="saveReconcileParams(this)">保存参数</button>
+      <span id="rcHint" class="dim" style="font-size:12px"></span>
+    </div>
+    <table><thead><tr><th>供应商</th><th>模型</th><th>动作</th><th>结果</th><th>依据</th><th>时刻</th><th></th></tr></thead>
+    <tbody id="rcBody"></tbody></table>
+    <div class="dim" style="font-size:12px;margin-top:6px" id="rcMeta"></div>
+  </div>
+  <div class="card">
+    <h3>自适应限流学习（各家实时学到的限流上限，随时段/市场自动浮动）
+      <button class="btn mini" onclick="loadRateLimitLearn()">刷新</button></h3>
+    <table><thead><tr><th>供应商</th><th>高峰限流</th><th>低峰限流</th><th>当前用量</th><th>置信</th><th></th></tr></thead>
+    <tbody id="rateLimitBody"></tbody></table>
+    <div class="dim" style="font-size:12px;margin-top:6px" id="rateLimitMeta"></div>
+  </div>
+  <div class="card">
+    <h3>维护操作</h3>
+    <div class="toolbar">
+      <button class="btn ghost" onclick="withBusy(this,'刷新中…',()=>api('/api/catalog/refresh','POST'),r=>'目录已刷新：'+r.catalogSize+' 个模型')">刷新模型目录</button>
+      <button class="btn warn" onclick="if(confirm('重置当日额度计数？（次日会自动重置）'))withBusy(this,'重置中…',()=>api('/api/budget/reset','POST'),'已重置')">重置当日额度</button>
+      <button class="btn ghost" onclick="withBusy(this,'重载中…',()=>api('/api/config/reload','POST'),'配置已重载')">热重载配置文件</button>
+    </div>
+    <div class="toolbar" style="margin-top:8px">
+      <span class="dim">自动发现上游 /v1/models（默认关：模型清单只信手工配置，避免拉回一堆不可调用的模型）</span>
+      <button class="btn ghost" id="discBtn" onclick="toggleDiscovery(this)">读取中</button>
+    </div>
+  </div>
+</div>
+
+<!-- 弹窗 -->
+<div class="modal-bg" id="modalBg" onclick="if(event.target===this)closeModal()">
+  <div class="modal" id="modalBox"></div>
+</div>
+<div id="toast"><span id="toastIcon">✓</span><span id="toastMsg"></span></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+/** 行渲染追加：只解析新片段，绝不重解析整表。旧写法 X.innerHTML += 每追加一行都要把已有 N 行序列化再重建，总代价 O(N^2)——日志页 500 行实测约 7s 主线程独占，点"链路"的点击就排在这段渲染风暴后面（表现为"偶尔很卡/整台机器卡"）。 */
+const ap = (el, html) => el.insertAdjacentHTML('beforeend', html);
+/** ===== 卡顿自证（2026-09-28）=====
+ * 用户报"点几次链路还是很卡"时，服务端与渲染各项实测都不慢，只能让页面自己把分项耗时记下来。
+ * 记录：每次点链路的 网络/DOM插入/到绘制完成 三段、每次整表渲染的 网络/渲染 两段、主线程最长阻塞、
+ * 以及本页脚本是否早于服务重启加载（旧脚本仍在跑，改动看不见）。 */
+const PERF = { trace: [], load: [], longMax: 0, longAt: '', longCount: 0, svcStart: 0, probed: false,
+  serverCounts: null, serverSlow: null, vis: [], freeze: [], longTail: [], hbEvents: [],
+  cpuBase: 0, cpuLast: 0, env: null, ab: null, abBusy: false,
+  hb: { ticks: 0, maxDrift: 0, at: '', over: 0, hiddenTicks: 0 } };
+const hms = d => new Date(d ?? Date.now()).toLocaleTimeString('zh-CN', { hour12: false });
+try {
+  new PerformanceObserver(l => l.getEntries().forEach(e => {
+    PERF.longCount++;
+    const ms = Math.round(e.duration);
+    if (ms > PERF.longMax) { PERF.longMax = ms; PERF.longAt = hms(); }
+    const owner = (e.attribution && e.attribution[0]) || {};
+    PERF.longTail.push({ t: hms(), st: Math.round(e.startTime), ms: ms, kind: owner.name || '?', entry: owner.entryType || '',
+      container: owner.containerType || '', src: (owner.containerName || '').slice(0, 60) });
+    if (PERF.longTail.length > 25) PERF.longTail.shift();
+    if (ms > 120) renderPerf();
+  })).observe({ entryTypes: ['longtask'] });
+} catch (e) { /* 老浏览器无 longtask */ }
+/** ===== 标签页休眠 / 主线程独占 的分辨器（2026-09-29）=====
+ * 用户第二轮诊断：网关自己报 1ms，浏览器秒表却记 4901/8332ms，且网络分段全取不到——
+ * 尖峰既不在网关也不在网络栈，只剩两种解释：
+ *   A 主线程被别的 JS 占住（点击的 await 回调只能排队）→ 心跳会漂移，且伴随长任务；
+ *   B 后台标签页被浏览器休眠（Edge 效率模式/睡眠标签页），唤醒瞬间才补做 → 心跳在隐藏期漂移、
+ *     可见性/冻结事件的时刻会紧贴在尖峰之前。
+ * 心跳用 250ms 定时器实测间隔：只有"页面可见时的漂移"才算主线程独占，隐藏期漂移是浏览器省电，属正常。 */
+let _hbLast = performance.now(), _visAt = performance.now(), _wasHidden = false;
+try { performance.setResourceTimingBufferSize(4000); } catch (e) { /* 部分浏览器不允许 */ }
+document.addEventListener('visibilitychange', () => {
+  const hidden = document.visibilityState === 'hidden';
+  if (!hidden) { _visAt = performance.now(); _wasHidden = false; } else _wasHidden = true;
+  PERF.vis.push({ t: hms(), s: document.visibilityState });
+  if (PERF.vis.length > 30) PERF.vis.shift();
+});
+['freeze', 'resume'].forEach(name => document.addEventListener(name, () => {
+  PERF.freeze.push({ t: hms(), e: name, hidden: document.visibilityState === 'hidden' });
+  if (PERF.freeze.length > 20) PERF.freeze.shift();
+}));
+setInterval(() => {
+  const now = performance.now(), drift = Math.round(now - _hbLast - 250);
+  _hbLast = now;
+  PERF.hb.ticks++;
+  if (_wasHidden) { PERF.hb.hiddenTicks++; return; }   // 隐藏期的节流是浏览器省电，不算卡顿证据
+  if (drift > PERF.hb.maxDrift) { PERF.hb.maxDrift = drift; PERF.hb.at = hms(); }
+  if (drift > 500) PERF.hb.over++;
+  if (drift > 400) { PERF.hbEvents.push({ t: hms(), drift: drift, vis: document.visibilityState });
+    if (PERF.hbEvents.length > 25) PERF.hbEvents.shift(); }
+  _hbLastDrift = drift;
+}, 250);
+/** 点击当下"页面刚被唤醒多久"：<1s 说明这次点击落在了标签页唤醒的窗口里 */
+function perfWake() { return Math.round(performance.now() - _visAt); }
+/** 点击当下"上一次心跳漂了多少"：可见状态下大 = 主线程刚被占住过 */
+let _hbLastDrift = 0;
+function perfHbNow() { return _hbLastDrift; }
+/** 每次点击的浏览器侧现场（与网关无关，纯前端状态） */
+function perfCtx() {
+  const lastBig = PERF.hbEvents.length ? PERF.hbEvents[PERF.hbEvents.length - 1] : null;
+  const cpu = perfCanary(); PERF.cpuLast = cpu;
+  return { wake: perfWake(), vis: document.visibilityState, hb: perfHbNow(), cpu: cpu,
+    hbBig: lastBig ? lastBig.drift + '@' + lastBig.t : '', longMax: PERF.longMax,
+    frozen: PERF.freeze.length, longN: PERF.longCount };
+}
+/** CPU 探针：固定 20 万次空循环计时，并自校准——页面代码不变，取历史最快值当本机基线
+ *  （最快 = 那一刻没人和它抢核），当前值超过基线若干倍 = 整机在等 CPU
+ *  （agent/编译/杀软抢核，或内存吃紧开始分页），那不是本网页或网关的问题。 */
+function perfCanary() {
+  const t0 = performance.now();
+  let x = 0;
+  for (let i = 0; i < 200000; i++) x += i * 3;
+  const ms = Math.round((performance.now() - t0) * 10) / 10;
+  if (x === 0) return ms;                       // 防死代码消除（实际不会发生）
+  if (!PERF.cpuBase || ms < PERF.cpuBase) PERF.cpuBase = ms;
+  return ms;
+}
+/** 探针读数换算成"几倍于本机基线"，>=4 倍才算 CPU 饥饿 */
+function perfCpuStarved(v) {
+  v = v == null ? PERF.cpuLast : v;
+  if (v == null || !PERF.cpuBase) return false;
+  return v > Math.max(6, PERF.cpuBase * 4);
+}
+function perfPush(arr, o) { arr.push(o); if (arr.length > 20) arr.shift(); }
+/** 把一次请求拆到网络栈各段：排队(连接池/代理/扩展) / DNS / 建连 / 等响应(服务端) / 下载。
+ *  用途：秒表 net 飙高时，只有这一层能分清"网关慢"还是"浏览器到 127.0.0.1 这段路慢"。
+ *  t0/t1 是秒表的绝对时刻（performance.now 轴），必须一起传：资源计时条目本身只覆盖
+ *  "浏览器真正开始这个资源"到"响应收完"，秒表和它对不上的那部分——请求发出前(pre)和
+ *  响应收完之后(post)——正是 2026-09-29 那四条 4027/6055/1870/3579ms 尖峰唯一能藏身的地方。 */
+function perfNet(path, t0, t1, tm) {
+  try {
+    const swMs = Math.round((t1 == null ? t0 : t1) - t0);
+    const abs = new URL(path, location.href).href;
+    const es = performance.getEntriesByType('resource').filter(e => e.name === abs);
+    // 只认"这次点击之后才开始"的那条：同一行反复展开/收起时，末尾条目可能是上一次快请求的
+    let e = null;
+    for (let i = es.length - 1; i >= 0; i--) { if (es[i].startTime >= t0 - 30) { e = es[i]; break; } }
+    if (!e) return { q: null, dns: null, conn: null, wait: null, dl: null, sz: null,
+      pre: null, rt: null, post: null, sw: swMs, miss: true };
+    // 这次点击期间还有多少个别的请求在飞：连接池只有 6 条 HTTP/1.1 槽位，被占满就只能在浏览器里排队
+    const busy = performance.getEntriesByType('resource')
+      .filter(x => x !== e && x.startTime < t1 && (x.responseEnd || t1) > t0)
+      .slice(-6).map(x => ({ p: x.name.replace(/^https?:\/\/[^/]+/, '').slice(0, 34),
+        ms: Math.round(x.duration), at: Math.round(x.startTime - t0) }));
+    return {
+      pre: Math.round(e.startTime - t0),                      // 调了 fetch 到浏览器开始这个资源
+      rt: Math.round(e.duration),                             // 浏览器网络栈自报的总时长
+      post: Math.round(t1 - e.responseEnd),                   // 响应收完到 JS 续跑
+      // post 再切三刀（2026-09-29 四条尖峰 post=1991/6459/7938ms 而心跳零漂移，必须分清是哪一刀）：
+      // pHead 首字节→fetch 兑现；pBody 网络报"收完"→r.json() 兑现（body 交付+解析，仍在浏览器进程内）；
+      // pRun  json 兑现→我们的续体跑起来（这一段才是主线程调度）。pBody + pRun ≈ post。
+      pHead: tm && tm.tHead ? Math.round(tm.tHead - e.responseStart) : null,
+      pBody: tm && tm.tBody ? Math.round(tm.tBody - e.responseEnd) : null,
+      pRun: tm && tm.tBody ? Math.round(t1 - tm.tBody) : null,
+      prox: (e.proxyStart && e.proxyEnd) ? Math.round(e.proxyEnd - e.proxyStart) : 0,  // 非 0 = 这一发走了代理
+      enc: e.encodedBodySize,                                 // 线上字节（对比 transferSize 看是否有头开销）
+      q: Math.round(e.requestStart - e.startTime),            // 负数=连接前排队/代理耗时，服务端看不到
+      dns: Math.round(e.domainLookupEnd - e.domainLookupStart),
+      conn: Math.round(e.connectEnd - e.connectStart),
+      wait: Math.round(e.responseStart - e.requestStart),     // 真正的服务端 TTFB
+      dl: Math.round(e.responseEnd - e.responseStart),
+      sz: e.transferSize,                                     // 响应字节：链路行多时是否是大 payload 拖的
+      proto: e.nextHopProtocol || '',                         // h2 没有 6 连接上限；http/1.1 有
+      busy: busy,
+      sw: swMs,
+    };
+  } catch (x) { return null; }
+}
+/** 页面全局的 fetch / XMLHttpRequest / Body.prototype.json 有没有被扩展改写过。
+ *  原生实现 String(fn) 必然含 "[native code]"；内容脚本往 MAIN world 包一层就会露出包装源码。
+ *  这是 2026-09-29 那四条尖峰（post=1991/6459/7938ms）唯一还站得住的解释方向：
+ *  网络栈自报只花 ~20ms、心跳零漂移（=主线程空）、JS 却晚醒好几秒——只能说明
+ *  "await 的那个 promise 自己迟迟不 ready"，而 MV3 扩展的 service worker 冷启动正好是 1~8 秒。 */
+function perfEnv() {
+  const nat = f => { try { return /\[native code\]/.test(String(f)); } catch (e) { return null; } };
+  const src = f => { try { return String(f).replace(/\s+/g, ' ').slice(0, 140); } catch (e) { return ''; } };
+  let brands = null;
+  try { brands = (navigator.userAgentData || {}).brands || null; } catch (e) {}
+  return { fetchNative: nat(window.fetch), xhrNative: nat(window.XMLHttpRequest),
+    // Chrome 没有 window.Body 全局（它是 mixin），要摸真能取到的 Response.prototype.json
+    jsonNative: (typeof Response === 'undefined' || !Response.prototype) ? null : nat(Response.prototype.json),
+    fetchSrc: src(window.fetch), brands: brands,
+    iframes: document.getElementsByTagName('iframe').length,
+    iframeSrcs: Array.from(document.getElementsByTagName('iframe')).map(f => { try { return (f.src || f.id || '(无src)').slice(0, 40); } catch (e) { return '?'; } }).slice(0, 4),
+    ua: navigator.userAgent };
+}
+/** 主线程队列是否活着：MessageChannel 往返通常 <2ms。尖峰时若它仍很小而 fetch 迟迟不兑现，
+ *  慢的就不是"页面任务排队"，而是 promise 本身没人兑现。 */
+const abLag = () => new Promise(res => {
+  try {
+    const t = performance.now(); const ch = new MessageChannel();
+    ch.port1.onmessage = () => { ch.port1.close(); res(Math.round(performance.now() - t)); };
+    ch.port2.postMessage(0);
+  } catch (e) { res(-1); }
+});
+/** 决定性对照：一条单发 + 六条并发（共七臂），每臂一条唯一路径，事后拿这条路径去 /api/perflog 查网关自己记的时刻。
+ *  上一版四臂全打 /api/perflog，而那个端点刻意不记录自己 → 拿不到"网关几点答完的"，
+ *  于是 17 秒卡在"请求根本没发出去"还是"答完了没交到 JS 手上"仍然分不清（2026-09-29 的自查漏洞）。
+ *  改打 /api/trace/ab-<标记>：空结果、单次索引查询（实测 8ms），路径带标记、且被 ApiTimingFilter 记账。
+ *  维度一 realm：本页 fetch vs 新建 about:blank 同源 iframe 的 fetch（内容脚本注不进来，必是原生）。
+ *    注意 iframe 与本页同进程、同主线程，所以它只能排除"MAIN world 的 JS 改写"，排不掉浏览器进程内部的延迟；
+ *  维度二 加载器：fetch vs XMLHttpRequest（Chrome 内两条交付通路，同一个网络服务）；
+ *  维度三 处理链：/api（过过滤器+查库）vs 静态资源（Spring 静态处理，不碰库也不记账）；
+ *  维度四 缓存：no-store vs default（/api 全是 chunked 且无 Cache-Control，默认每发都要写磁盘缓存条目）。
+ *  六个维度两两只差一项的臂全放在同一个并发组里比，避免"单发 vs 并发"混比把连接池竞争算进差值；
+ *  单发那条只用来量"并发 vs 单发"这一维：单发也慢=逐请求拦截，只有并发组慢=有个共享闸门（连接池/注入层的锁）。
+ *  每臂还各自带两个不需要跟别的臂对账的绝对量：srvGap=网关记下完成时刻→页面拿到，afterNet=浏览器资源计时报"收完"→JS 拿到。 */
+async function perfAB() {
+  // 上一轮如果中途抛错没走到收尾，busy 会把此后所有对照都关死——超过 60s 没动静就当作那一轮已经死了
+  if (PERF.abBusy && Date.now() - (PERF.abAt || 0) < 60000) return;
+  PERF.abBusy = true;
+  PERF.abAt = Date.now();
+  // 阶段标记：整轮正常只跑一两百毫秒，任何一步停在几百毫秒以上，就是插桩自己撞上了那次尖峰；停在哪一步即是哪一步
+  PERF.abTrace = [];
+  const _t0 = performance.now();
+  const mark = m => PERF.abTrace.push(m + '@' + Math.round(performance.now() - _t0) + 'ms');
+  mark('begin');
+  const hdr = {}; try { const tk = localStorage.getItem('gw_admin_token') || ''; if (tk) hdr['x-admin-token'] = tk; } catch (e) {}
+  const rnd = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  // 计时源按臂取：iframe realm 发起的请求，资源计时记在 iframe 自己的缓冲里，父页取不到（实测 ent.n=0）
+  const entOf = (abs, t1, P) => {
+    const es = P.getEntriesByType('resource').filter(e => e.name === abs);
+    const e = es[es.length - 1];
+    if (!e) return { n: 0 };
+    return { n: es.length, q: Math.round(e.requestStart - e.startTime), wait: Math.round(e.responseStart - e.requestStart),
+      dl: Math.round(e.responseEnd - e.responseStart), rt: Math.round(e.duration),
+      afterNet: Math.round(t1 - e.responseEnd), proto: e.nextHopProtocol || '' };
+  };
+  const arm = async (kind, f, path, cache, perf) => {
+    const abs = new URL(path, location.href).href;
+    const P = perf || performance;      // 同一臂的 t0/t1/计时条目必须出自同一个时钟，跨 realm 的 timeOrigin 不保证一致
+    const t0 = P.now(), e0 = Date.now();
+    const ctl = new AbortController(); const timer = setTimeout(() => { try { ctl.abort(); } catch (e) {} }, 40000);
+    const go = useSignal => { const o = { cache: cache, headers: hdr }; if (useSignal) o.signal = ctl;
+      return f(abs, o).then(r => r.text().then(() => r.status)); };
+    let st = null;
+    try { st = await go(true); }
+    catch (e) {
+      // 跨 realm 的 AbortSignal 可能被干净 iframe 当场拒掉——瞬时失败不是要量的延迟，去掉 signal 重跑一次；慢失败（被掐断）照实记 ERR
+      if (P.now() - t0 < 200) { try { st = await go(false); } catch (e2) { st = 'ERR'; } }
+      else st = 'ERR';
+    }
+    clearTimeout(timer);
+    const t1 = P.now();
+    mark('arm:' + kind + ':' + st);
+    let ent = {};
+    try { ent = entOf(abs, t1, P); } catch (e) { ent = { n: -1, entErr: e.message }; }   // 取计时失败不能把整条臂丢掉
+    return { kind, path, ms: Math.round(t1 - t0), e0, e1: Date.now(), st, lag: await abLag(),
+      ent: ent, clk: P === performance ? 'page' : 'iframe' };
+  };
+  const xhrArm = path => new Promise(res => {
+    const abs = new URL(path, location.href).href;
+    const t0 = performance.now(), e0 = Date.now();
+    const done = r => res(Object.assign({ kind: 'page-xhr', path, e0, lag: 0, clk: 'page' }, r));
+    try {
+      const x = new XMLHttpRequest();
+      x.open('GET', abs, true); x.timeout = 40000;
+      Object.keys(hdr).forEach(k => { try { x.setRequestHeader(k, hdr[k]); } catch (e) {} });
+      x.onloadend = () => { const t1 = performance.now(); mark('arm:page-xhr:' + x.status);
+        try { done({ ms: Math.round(t1 - t0), e1: Date.now(), st: x.status, ent: entOf(abs, t1, performance) }); }
+        catch (e) { done({ ms: Math.round(performance.now() - t0), e1: Date.now(), st: 'ENTERR:' + e.message, ent: {} }); } };
+      x.onerror = x.ontimeout = () => done({ ms: Math.round(performance.now() - t0), e1: Date.now(), st: 'ERR', ent: {} });
+      x.send();
+    } catch (e) { done({ ms: -1, e1: Date.now(), st: 'EXC', ent: {} }); }
+  });
+  // 先把干净 realm 备好（纯本地，不联网）
+  let cf = null, cw = null, cleanNat = null, err = '', fr = null;
+  try {
+    fr = document.createElement('iframe');
+    fr.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;border:0';
+    document.body.appendChild(fr);
+    await new Promise(res => { fr.onload = res; fr.src = 'about:blank'; setTimeout(res, 1500); });
+    cw = fr.contentWindow; cf = cw && cw.fetch;
+    cleanNat = cf ? /\[native code\]/.test(String(cf)) : null;
+  } catch (e) { err = e.message; }
+  mark('iframe:' + (cf ? 'ok' : 'no'));
+  const pf = (u, o) => fetch(u, o);
+  const cp = cw && cw.performance && cw.performance.now ? cw.performance : null;
+  const pth = tag => '/api/trace/ab-' + tag + '-' + rnd();
+  const paLone = pth('lone'), paPN = pth('pNS'), paPD = pth('pDef');
+  const paCN = pth('cNS'), paCD = pth('cDef'), paXH = pth('xhr'), paST = '/ui/index.html?ab=st-' + rnd();
+  let A = null, G = [];
+  try {
+    A = await arm('lone-page-no-store', pf, paLone, 'no-store'); mark('lone');
+    const g = await Promise.all([
+      arm('page-no-store', pf, paPN, 'no-store'),
+      arm('page-default', pf, paPD, 'default'),
+      cf ? arm('clean-no-store', cf.bind(cw), paCN, 'no-store', cp) : null,
+      cf ? arm('clean-default', cf.bind(cw), paCD, 'default', cp) : null,
+      xhrArm(paXH),
+      arm('page-static', pf, paST, 'no-store')]);
+    G = g.filter(Boolean);
+    mark('group');
+  } catch (e) { err = (err ? err + '; ' : '') + e.message; }
+  finally { if (fr) fr.remove(); }   // 中途抛错也要回收：上一版会攒下野 iframe（实测见过 iframes:1）
+  const arms = [A].concat(G);
+  // 与网关自己记的时刻对账：browserAfterSrv = 页面拿到响应的时刻 - 网关答完的时刻（同一台机器的墙钟）
+  let recErr = '', recRows = -1, recHit = 0;
+  try {
+    const w = await api('/api/perflog?limit=150');
+    const rows = (w && w.rows) || [];
+    recRows = rows.length;
+    arms.forEach(a => {
+      const r = rows.filter(x => x.path === a.path).pop();
+      if (r) {
+        recHit++;
+        a.srvMs = r.ms; a.srvTs = r.ts;
+        // 网关记下这条的时刻是"处理完"的时刻：减发出时刻≈请求在浏览器网络层里滞留+服务端耗时；减拿到时刻≈回包在浏览器里的交付耗时
+        a.sendLag = r.ts - a.e0;
+        a.sendWait = r.ts - a.e0 - r.ms;   // 再扣掉服务端自己报的处理时间 ≈ 请求"发出→网关开始答"的滞留
+        a.browserAfterSrv = a.e1 - r.ts;
+      }
+    });
+  } catch (e) { recErr = String((e && e.message) || e); }
+  mark('recon');
+  const msOf = k => { const a = arms.filter(x => x.kind === k)[0]; return a ? a.ms : null; };
+  const diff = (x, y) => (x != null && y != null) ? x - y : null;
+  const maxOf = arr => arr.filter(v => typeof v === 'number' && v >= 0)
+    .reduce((m, v) => Math.max(m, v), null);
+  const gaps = arms.map(a => a.browserAfterSrv);
+  // afterNet：浏览器自己的资源计时说"响应收完"之后，又过了多久这条 arm 才拿到（同一请求内部对账，不依赖别的臂）
+  const afters = arms.map(a => a.ent && a.ent.afterNet);
+  PERF.ab = { at: hms(), now: Date.now(), arms: arms,
+    lone: msOf('lone-page-no-store'), pageNS: msOf('page-no-store'), pageDef: msOf('page-default'),
+    cleanNS: msOf('clean-no-store'), cleanDef: msOf('clean-default'),
+    xhr: msOf('page-xhr'), staticE: msOf('page-static'),
+    status: arms.map(a => a.st).join('/'),
+    // 差值全部在并发组内同档比较：单发臂只用来判"有没有共用的闸门"
+    dWrapper: diff(msOf('page-no-store'), msOf('clean-no-store')),   // 只差 realm：本页 fetch 被包了一层？
+    dCache: diff(msOf('page-default'), msOf('page-no-store')),       // 只差缓存：写磁盘缓存条目？
+    dRealmCache: diff(msOf('page-default'), msOf('clean-default')),  // 只差 realm（默认缓存档），复核 dWrapper
+    dGate: diff(msOf('page-no-store'), msOf('lone-page-no-store')),  // 只差并发：同配置单发 vs 并发组
+    dStatic: diff(msOf('page-static'), msOf('page-no-store')),       // 只差处理链：静态资源(158KB) vs /api 小响应，粗对照
+    srvGap: maxOf(gaps),                                             // 网关答完→页面拿到，最多差多少
+    sendGap: maxOf(arms.map(a => a.sendWait)),                       // 页面发出→网关开始答，最多差多少（请求滞留段）
+    afterNet: maxOf(afters),                                         // 浏览器报"收完"→JS 拿到，最多差多少
+    srvMsMax: maxOf(arms.map(a => a.srvMs)),
+    lagMax: maxOf(arms.map(a => a.lag)),
+    cleanNative: cleanNat, err: err,
+    trace: PERF.abTrace,                                    // 停在哪一步：正常应是 begin→iframe→arm:…→lone→group→recon 全齐
+    recErr: recErr, recRows: recRows, recHit: recHit };   // 对账是否配上：配不上的话这里必须说得出原因
+  PERF.abBusy = false;
+  renderPerf();
+}
+/** 对照里该看的差值，一律用绝对 ms：冷连接/预热会让"干净环境"也报出好几倍的差距，
+ *  倍数会把人带偏，只有"多花了多少毫秒"能和大几十秒的尖峰直接对账。判定线取 300ms。
+ *  差值在 perfAB 里算好（同并发组、同档缓存，只差一个维度），这里只负责"没测过时给 -1"。 */
+const abWrap = a => (a && typeof a.dWrapper === 'number') ? a.dWrapper : -1;
+const abCache = a => (a && typeof a.dCache === 'number') ? a.dCache : -1;
+const abGap = a => (a && typeof a.srvGap === 'number') ? a.srvGap : null;
+const abMs = v => (typeof v === 'number' ? v + 'ms' : '未测');
+/** 手动版：不等尖峰，立刻采一次 env 并跑一次七臂对照，结果直接 toast 出来（只多发七个只读小请求）。 */
+async function selfTestFetch(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '对照中…'; }
+  try {
+    PERF.env = perfEnv();
+    await perfAB();
+    const a = PERF.ab || {}, patched = PERF.env.fetchNative === false;
+    const w = abWrap(a), c = abCache(a), g = abGap(a);
+    const hit = w >= 300 || c >= 300 || (g != null && g >= 300)
+      || a.afterNet >= 300 || a.dGate >= 300 || a.sendGap >= 300;
+    toast('七臂对照（HTTP ' + a.status + '）：单发 ' + abMs(a.lone) + '；并发组 本页绕缓存 ' + abMs(a.pageNS)
+      + ' · 本页默认 ' + abMs(a.pageDef) + ' · 干净realm绕缓存 ' + abMs(a.cleanNS) + ' · 干净realm默认 ' + abMs(a.cleanDef)
+      + ' · XHR ' + abMs(a.xhr) + ' · 静态 ' + abMs(a.staticE)
+      + ' ⇒ realm差 ' + abMs(a.dWrapper) + ' · 写缓存差 ' + abMs(a.dCache) + ' · 并发 vs 单发差 ' + abMs(a.dGate)
+      + ' · 静态 vs 接口差 ' + abMs(a.dStatic)
+      + ' · 网关答完→页面拿到 ' + abMs(a.srvGap) + ' · 发出→网关开始答 ' + abMs(a.sendGap)
+      + ' · 浏览器报收完→JS 拿到 ' + abMs(a.afterNet) + ' · MessageChannel 排队 ' + abMs(a.lagMax)
+      + (patched ? ' · 本页 fetch 已被改写' : '')
+      + (hit ? ' → 时间出在浏览器进程内（页面 realm、XHR、静态、缓存、网关都已各自排除）'
+        : ' → 这次七臂同速；尖峰是间歇的，卡的时候再按一次'),
+      hit || patched ? 'err' : 'ok');
+  } catch (e) { toast('对照测试失败: ' + e.message, 'err'); }
+  if (btn) { btn.disabled = false; btn.textContent = '瓶颈对照测试'; }
+}
+/** 网络分段里最该看的那一段 */
+function perfNetMain(n) {
+  if (!n) return '';
+  const tail = (typeof n.pBody === 'number' || typeof n.pRun === 'number')
+    ? [['响应后·交给JS', n.pBody], ['响应后·JS排队', n.pRun]]
+    : [['响应后延迟', n.post]];
+  const cand = [['请求前排队', n.pre], ['排队', n.q], ['DNS', n.dns], ['建连', n.conn],
+    ['服务端', n.wait], ['下载', n.dl]].concat(tail)
+    .filter(x => typeof x[1] === 'number' && x[1] >= 0);
+  if (!cand.length) return '';
+  cand.sort((a, b) => b[1] - a[1]);
+  return cand[0][0] + ' ' + cand[0][1] + 'ms';
+}
+/** 只在"慢的那一次"拉一次服务端计时窗口（/api/perflog），把网关自己测的耗时贴回这条记录。
+ *  正常点击不产生额外请求；尖峰时才有两边对账的证据：
+ *  网关 ms 很小而浏览器 wait 很大 → 卡在本机到 127.0.0.1 这段路（连接池/代理/扩展），不是网关。 */
+function perfServerMs(pathPrefix, rec) {
+  api('/api/perflog?limit=200').then(w => {
+    const hits = (w.rows || []).filter(r => (r.path || '').startsWith(pathPrefix));
+    rec.srv = hits.length ? hits[hits.length - 1].ms : null;  // null=窗口里没这条（被 limit 挤掉了）
+    PERF.serverCounts = { total: w.total, slow: w.slow, kept: w.kept, slowMs: w.slowMs,
+      windowStart: w.windowStart, serverNow: w.serverNow };
+    PERF.serverSlow = (w.rows || []).filter(r => r.ms >= 50).slice(-12);
+    renderPerf();
+  }).catch(() => { rec.srv = null; });
+}
+/** 与时间窗 [a,b]（performance.now 轴）重叠的长任务。
+ *  点击正在 await 网络时，页面自己的事件处理器是空的——这段时间占住主线程的
+ *  一定不是"这次点击的代码"，而是扩展 / 别的定时器 / GC，所以重叠能直接
+ *  把"4.9 秒卡在哪"钉死，而不是只能报一个总耗时。 */
+function perfLongIn(a, b) {
+  if (!(a > 0) || !(b > a)) return { n: 0, sum: 0, max: 0, at: '' };
+  let n = 0, sum = 0, max = 0, at = '';
+  PERF.longTail.forEach(e => {
+    if (e.st == null) return;
+    const ov = Math.min(b, e.st + e.ms) - Math.max(a, e.st);
+    if (ov > 0) { n++; sum += Math.round(ov); if (e.ms > max) { max = e.ms; at = e.t; } }
+  });
+  return { n, sum, max, at };
+}
+/** 慢点击的归因：先排除网关（网关自己报的 ms），再按浏览器现场分档。
+ *  返回 null 表示这次不慢，无需归因。 */
+function perfVerdict(t) {
+  if (!t || !(t.net > 120)) return null;
+  const c0 = t.ctx0 || {}, c1 = t.ctx1 || {};
+  if (t.srv != null && t.srv < 50) {
+    const cpu = Math.max(c0.cpu || 0, (t.ctx1 && t.ctx1.cpu) || 0);
+    if (c0.wake < 1500) return { txt: '非网关（网关 ' + t.srv + 'ms）· 标签页刚唤醒 ' + c0.wake + 'ms', c: 'var(--warn)' };
+    if (perfCpuStarved(cpu)) return { txt: '非网关（网关 ' + t.srv + 'ms）· 整机在等 CPU（探针 ' + cpu + 'ms = 本机基线 '
+      + PERF.cpuBase + 'ms 的 ' + (PERF.cpuBase ? Math.round(cpu / PERF.cpuBase) : '?') + ' 倍）', c: 'var(--err)' };
+    const hb = Math.max(c0.hb || 0, c1.hb || 0);
+    const ov = perfLongIn(t.w0, t.w1);
+    if (ov.n && ov.sum > Math.min(150, t.net * 0.3)) return { txt: '非网关（网关 ' + t.srv + 'ms）· 等待期间有 ' + ov.n + ' 个长任务占用主线程共 ' + ov.sum
+      + 'ms（最长 ' + ov.max + 'ms @' + ov.at + '），页面在排队而非在联网', c: 'var(--err)' };
+    // 秒表与浏览器自己的网络栈对不上账：时间藏在"资源开始之前"或"响应收完之后"，两段都在网关之外
+    const n = t.n || {};
+    if (typeof n.pRun === 'number' && n.pRun > Math.max(150, t.net * 0.4))
+      return { txt: '非网关（网关 ' + t.srv + 'ms）· 响应已解析完，JS 续体又被排了 ' + n.pRun
+        + 'ms（可定时器心跳同期只漂 ' + hb + 'ms——定时器正常而 promise 迟到，占住这条链的不是本页任务）', c: 'var(--err)' };
+    if (typeof n.pBody === 'number' && n.pBody > Math.max(150, t.net * 0.4)) {
+      const fsrc = PERF.env && PERF.env.fetchNative === false
+        ? '，且本页 fetch 已被改写（' + (PERF.env.fetchSrc || '').replace(/[<>&]/g, '').slice(0, 46) + '…）' : '';
+      const ab = PERF.ab && PERF.ab.arms && PERF.ab.arms.length
+        ? '；七臂对照（采于 ' + (PERF.ab.at || '?') + '，非本次点击当场）：单发 ' + abMs(PERF.ab.lone)
+          + '，并发组 本页绕缓存 ' + abMs(PERF.ab.pageNS) + ' / 本页默认 ' + abMs(PERF.ab.pageDef)
+          + ' / 干净 realm ' + abMs(PERF.ab.cleanNS) + ' / XHR ' + abMs(PERF.ab.xhr) + ' / 静态 ' + abMs(PERF.ab.staticE)
+          + ' ⇒ realm 差 ' + abMs(PERF.ab.dWrapper) + '、写缓存差 ' + abMs(PERF.ab.dCache)
+          + '、并发比单发多 ' + abMs(PERF.ab.dGate) + '、静态比接口多 ' + abMs(PERF.ab.dStatic)
+          + '、网关答完→页面拿到 ' + abMs(PERF.ab.srvGap)
+          + '、请求发出→网关开始答 ' + abMs(PERF.ab.sendGap)
+          + '、浏览器报收完→JS 拿到 ' + abMs(PERF.ab.afterNet)
+          : '';
+      const who = abWrap(PERF.ab) >= 300 ? '被改写的 window.fetch 这一层（扩展在响应链路上拦了一道）'
+        : abCache(PERF.ab) >= 300 ? 'Chrome 写磁盘缓存这一层（磁盘忙或杀软扫缓存目录）'
+        : (typeof (PERF.ab && PERF.ab.srvGap) === 'number' && PERF.ab.srvGap >= 300)
+          ? '网关之后、页面拿到之前的交付环节（网关已记下完成时刻，浏览器又压了 ' + PERF.ab.srvGap
+            + 'ms 才交给 JS；干净 realm、XHR、静态资源同样慢，指向 chrome.exe 进程内的第三方代码）'
+          : (PERF.ab && typeof PERF.ab.sendGap === 'number' && PERF.ab.sendGap >= 300)
+            ? '请求发出到网关开始答之间（页面按下 fetch 后 ' + PERF.ab.sendGap
+              + 'ms 网关才开始处理——请求还没出到网关，就卡在浏览器/系统网络栈的发送侧）'
+          : (PERF.ab && PERF.ab.dGate >= 300)
+            ? '并发时的共用闸门（同一条请求单发只 ' + PERF.ab.lone + 'ms，进了并发组变 ' + PERF.ab.pageNS
+              + 'ms——连接池或注入层里有一道锁，不是这一条请求本身慢）'
+          : (PERF.ab && PERF.ab.lagMax >= 300)
+            ? '浏览器的主线程队列（MessageChannel 空转也要排 ' + PERF.ab.lagMax + 'ms，说明当时线程本身被占住）'
+          : !(PERF.ab && PERF.ab.arms && PERF.ab.arms.length)
+            ? '浏览器进程内的交付环节（还没跑过对照，点面板上的"瓶颈对照测试"按钮即可定位到具体哪一层）'
+            : '浏览器进程内的交付环节（七臂对照没抓到差值，尖峰是间歇的，卡的时候再按一次"瓶颈对照测试"）';
+      return { txt: '非网关（网关 ' + t.srv + 'ms）· 网络 ' + n.rt + 'ms 就报"收完"，浏览器把 body 交到 JS 手上又用了 '
+        + n.pBody + 'ms' + fsrc + ab + '——瓶颈在' + who + '，网关和本机网络都不在其中', c: 'var(--err)' };
+    }
+    if (typeof n.post === 'number' && n.post > Math.max(150, t.net * 0.4))
+      return { txt: '非网关（网关 ' + t.srv + 'ms）· 响应 ' + n.rt + 'ms 时就收完了，JS 又被晚唤醒 ' + n.post
+        + 'ms（心跳没漂移=主线程空闲，只能是浏览器进程/扩展/渲染管线把回调压住了）', c: 'var(--err)' };
+    if (typeof n.pre === 'number' && n.pre > Math.max(150, t.net * 0.4))
+      return { txt: '非网关（网关 ' + t.srv + 'ms）· fetch 调下去 ' + n.pre + 'ms 后浏览器才真正开始这个请求'
+        + (n.busy && n.busy.length ? '（同期在飞：' + n.busy.slice(0, 3).map(b => b.p + ' ' + b.ms + 'ms').join('、') + '）' : '')
+        + '，' + (n.proto === 'h2' ? 'h2' : 'HTTP/1.1 每源站 6 条连接') + ' 的槽位被占住', c: 'var(--err)' };
+    if (hb > 300 || c0.hbBig) return { txt: '非网关（网关 ' + t.srv + 'ms）· 主线程被占住（心跳漂移 ' + hb + 'ms'
+      + (c0.hbBig ? '，最近一次大漂移 ' + c0.hbBig : '') + '）', c: 'var(--err)' };
+    const seg = perfNetMain(t.n);
+    return { txt: '非网关（网关 ' + t.srv + 'ms）· 浏览器侧' + (seg ? ' ' + seg : ' 未知段'), c: 'var(--err)' };
+  }
+  if (t.srv != null) return { txt: '网关自身 ' + t.srv + 'ms', c: 'var(--err)' };
+  return { txt: '主因 ' + (perfNetMain(t.n) || '未对账'), c: 'var(--warn)' };
+}
+function renderPerf() {
+  const el = document.getElementById('logPerf');
+  if (!el) return;
+  const t = PERF.trace[PERF.trace.length - 1];
+  const l = PERF.load[PERF.load.length - 1];
+  const loaded = performance.timeOrigin;
+  let ver, verColor = 'var(--dim)';
+  if (!PERF.svcStart) ver = '版本核对中';
+  else if (loaded >= PERF.svcStart) { ver = '脚本=本轮版本'; verColor = 'var(--ok)'; }
+  else { ver = '旧脚本（页面早于服务重启，请 Ctrl+F5）'; verColor = 'var(--err)'; }
+  const paint = t ? (t.paint == null ? '…' : t.paint + 'ms') : '—';
+  const pColor = t && t.paint != null ? (t.paint > 250 ? 'var(--err)' : t.paint > 120 ? 'var(--warn)' : 'var(--ok)') : 'var(--dim)';
+  const v2 = perfVerdict(t);
+  const cpuNow = perfCanary();   // 一次即可：探针本身要跑 20 万次循环，别在一行模板里跑两遍
+  const cpuShown = (t && t.ctx0 && t.ctx0.cpu) || cpuNow;
+  const cpuCol = perfCpuStarved(cpuShown) ? 'var(--err)' : 'var(--ok)';
+  el.innerHTML =
+    `<span style="color:${verColor}" title="页面加载时刻 ${hms(loaded)} / 本轮服务启动时刻 ${PERF.svcStart ? hms(PERF.svcStart) : '?'}">● ${esc(ver)}</span>` +
+    `<span class="dim" title="分段：${esc(perfNetMain(t && t.n))}${t && t.n && t.n.rt != null ? '｜请求前' + t.n.pre + ' 联网' + t.n.rt + ' 响应后' + t.n.post + '｜排队' + t.n.q + ' DNS' + t.n.dns + ' 建连' + t.n.conn + ' 服务端' + t.n.wait + ' 下载' + t.n.dl + ' 协议' + (t.n.proto || '?') + ' 同期在飞' + ((t.n.busy || []).length) : ''}${t && t.srv != null ? '｜网关自己报的耗时 ' + t.srv + 'ms' : ''}${t && t.ctx0 ? '｜点击时页面已唤醒 ' + t.ctx0.wake + 'ms、可见性 ' + t.ctx0.vis : ''}">最近点链路：总计 ${t ? t.net : '—'}ms${t && t.n && typeof t.n.rt === 'number' ? '<span class="dim">（联网 ' + t.n.rt + ' · 请求前 ' + t.n.pre + ' · <b style="color:' + (t.n.post > 150 ? 'var(--err)' : 'var(--dim)') + '">响应后 ' + t.n.post + (typeof t.n.pBody === 'number' ? '</b>=交给JS <b style="color:' + (t.n.pBody > 150 ? 'var(--err)' : 'var(--dim)') + '">' + t.n.pBody + '</b>+排队 ' + t.n.pRun : '</b>') + '）</span>' : ''}${t && t.srv != null ? ' · <b style="color:var(--ok)">网关实测 ' + t.srv + 'ms</b>' : ''}${v2 ? '<b style="color:' + v2.c + '"> ' + esc(v2.txt) + '</b>' : ''} · DOM ${t ? t.dom : '—'}ms · 到绘制 <b style="color:${pColor}">${paint}</b>${t ? ' <span class="dim">(' + t.t + '，' + t.steps + ' 步)</span>' : ''}</span>` +
+    `<span class="dim">最近整表渲染：网络 ${l ? l.net : '—'}ms · 渲染 ${l ? l.dom : '—'}ms（${l ? l.rows : '—'} 行）</span>` +
+    `<span class="dim" title="超过 50ms 独占主线程的任务：这类任务期间你的点击只能排队">最长阻塞 ${PERF.longMax || 0}ms${PERF.longAt ? ' @' + esc(PERF.longAt) : ''} · 共 ${PERF.longCount} 次</span>` +
+    `<span class="dim" title="心跳定时器实测间隔超出 250ms 的部分：页面可见时的漂移=主线程被占住；隐藏期的节流是浏览器省电，已单独计数不计入。CPU 探针=固定 20 万次空循环的耗时，页面代码不变，它变大只能是整机在等 CPU">主线程漂移 最大 ${PERF.hb.maxDrift || 0}ms${PERF.hb.at ? ' @' + esc(PERF.hb.at) : ''} · 超500ms ${PERF.hb.over} 次 · CPU探针 <b style="color:${cpuCol}">${cpuShown}ms</b>（本机最快一次 ${PERF.cpuBase}ms；判等待要同时超 6ms 和基线 4 倍） · 休眠事件 ${PERF.freeze.length ? esc(PERF.freeze.map(f => f.e + '@' + f.t).join(' ')) : '0 次'} · 当前 ${document.visibilityState === 'visible' ? '可见' : '后台'}（已 ${Math.round(perfWake() / 1000)}s）</span>` +
+    `<span class="dim">视口 ${window.innerWidth}×${window.innerHeight}${document.documentElement.scrollWidth > document.documentElement.clientWidth ? '（表格已横向溢出）' : ''}</span>` +
+    `<span class="dim" title="本页全局 fetch/XHR/Response.json 是否被扩展改写（原生实现的 toString 里必有 [native code]）。七臂对照=同一个网关接口跑七条唯一路径：单发一条，并发组再跑六条（本页/干净 iframe × 绕缓存/默认缓存）+ XHR + 静态资源；差值只在并发组内同档两两比，每只差一个维度。事后拿这些路径去 /api/perflog 查网关自己记下的完成时刻，算出网关答完→页面拿到、浏览器报收完→JS 拿到两个绝对差值。只在出现 >300ms 尖峰后才自动跑，也可手动按按钮">` +
+    `fetch ${!PERF.env ? '未采' : PERF.env.fetchNative === false ? '<b style="color:var(--err)">已被改写</b>' : PERF.env.fetchNative === true ? '<b style="color:var(--ok)">原生</b>' : '未知'}` +
+    ` · Response.json ${!PERF.env ? '—' : PERF.env.jsonNative === false ? '<b style="color:var(--err)">被改写</b>' : PERF.env.jsonNative === true ? '原生' : '未知'}` +
+    ` · 七臂对照 ${!PERF.ab ? '未测' : 'realm差 ' + abMs(PERF.ab.dWrapper) + ' · 写缓存差 ' + abMs(PERF.ab.dCache)
+      + ' · 并发比单发多 ' + abMs(PERF.ab.dGate)
+      + ' · 网关答完→页面拿到 ' + abMs(PERF.ab.srvGap)
+      + ' · 发出→网关开始答 ' + abMs(PERF.ab.sendGap)
+      + ' · 收完→JS 拿到 ' + abMs(PERF.ab.afterNet)
+      + ' · 主线程排队 ' + abMs(PERF.ab.lagMax)
+      + (abWrap(PERF.ab) >= 300 ? '（本页 fetch 这层多花 ' + abWrap(PERF.ab) + 'ms）' : '')}</span>`;
+}
+function copyPerfDiag(btn) {
+  const txt = JSON.stringify({
+    pageUrl: location.href,
+    pageLoadedAt: new Date(performance.timeOrigin).toLocaleString('zh-CN'),
+    serviceStartAt: PERF.svcStart ? new Date(PERF.svcStart).toLocaleString('zh-CN') : null,
+    staleScript: PERF.svcStart ? performance.timeOrigin < PERF.svcStart : null,
+    viewport: window.innerWidth + 'x' + window.innerHeight, dpr: window.devicePixelRatio,
+    tableScrollWidth: document.documentElement.scrollWidth,
+    longtask: { count: PERF.longCount, maxMs: PERF.longMax, at: PERF.longAt, tail: PERF.longTail },
+    heartbeat: PERF.hb, heartbeatEvents: PERF.hbEvents,
+    visibility: { now: document.visibilityState, events: PERF.vis, wakeMs: perfWake(),
+      discarded: !!document.wasDiscarded, prerendering: !!document.prerendering },
+    freezeEvents: PERF.freeze,
+    fetchEnv: PERF.env, abTest: PERF.ab,
+    verdicts: PERF.trace.map(x => { const v = perfVerdict(x); return { t: x.t, tid: x.tid, net: x.net, srv: x.srv, why: v && v.txt }; }).filter(x => x.net > 120),
+    browser: { ua: navigator.userAgent, cores: navigator.hardwareConcurrency,
+      mem: navigator.deviceMemory, conn: (navigator.connection || {}).effectiveType,
+      domNodes: document.getElementsByTagName('*').length,
+      jsHeapMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null,
+      jsHeapLimitMB: performance.memory ? Math.round(performance.memory.jsHeapSizeLimit / 1048576) : null,
+      cpuProbeNow: perfCanary(), cpuProbeAtClick: PERF.cpuLast, cpuBase: PERF.cpuBase },
+    serverCounts: PERF.serverCounts || null,
+    serverSlow: PERF.serverSlow || null,
+    traceClicks: PERF.trace, logRenders: PERF.load,
+  }, null, 1);
+  const done = () => toast('诊断已复制：' + PERF.trace.length + ' 次点链路 + ' + PERF.load.length + ' 次整表渲染');
+  const viaTextArea = () => {
+    const ta = document.createElement('textarea'); ta.value = txt;
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(ta); ta.select();
+    let ok = false; try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    ta.remove();
+    if (ok) done(); else toast('复制不可用，已改用选中：请 Ctrl+C 或截图"本页自测"行', true);
+    return ok;
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, viaTextArea);
+  else viaTextArea();
+}
+/** 只在首次进入日志页时核对一次服务启动时刻（/api/overview 的 configLoadedAt≈本轮进程启动） */
+function perfProbeVersion() {
+  if (PERF.probed) return;
+  PERF.probed = true;
+  api('/api/overview').then(o => { PERF.svcStart = o.configLoadedAt || 0; renderPerf(); }).catch(() => { PERF.probed = false; });
+}
+/** 语义类别中文标签（模型表单/卡片/运行时共用） */
+const CATEGORY_LABELS = { code:'写代码', doc:'写文档', translate:'翻译', analysis:'分析推理', general:'通用' };
+const categoryLabel = c => CATEGORY_LABELS[c] || c || '';
+// #15 压缩路径中文（compressTag 落库值，ContextCompressor 产出）：判断"早停是否压缩引起"的证据
+const COMPRESS_CN = {
+  'skipped':'未压缩', 'none-needed':'无需压', 'incremental-ok':'增量压缩', 'incremental-ok-shrunk':'增量+收缩',
+  'full-ok':'全量压缩', 'full-ok-shrunk':'全量+收缩', 'hard-truncate':'硬截断', 'hard-truncate-shrunk':'硬截断+收缩',
+};
+const compressCn = t => COMPRESS_CN[t] || t;
+const fmt = n => n == null ? '—' : (n >= 1000 ? (n/1000).toFixed(1)+'s' : n+'ms');
+const fmtT = n => n == null ? '—' : (n >= 10000 ? (n/1000).toFixed(1)+'k' : n);
+
+let ov = null;
+/** 各供应商“自动发现模型”展开状态（跨刷新保持） */
+const expandedModels = {};
+function toggleDiscovered(pid) { expandedModels[pid] = !expandedModels[pid]; renderProviders(); }
+
+// ================= 点击反馈基建 =================
+/** 全局请求进度条：任何 api() 在途时显示 */
+let inflight = 0;
+function barStart() {
+  inflight++;
+  const b = $('#globalBar');
+  b.classList.add('active');
+  b.style.width = Math.min(90, 18 * inflight + 20) + '%';
+}
+function barEnd(ok) {
+  inflight = Math.max(0, inflight - 1);
+  const b = $('#globalBar');
+  if (inflight === 0) {
+    b.classList.remove('active');   // 立即停止 pulse 动画（避免空转）
+    b.style.width = ok ? '100%' : '15%';
+    setTimeout(() => { if (inflight === 0) { b.style.opacity = '0'; setTimeout(() => { if (inflight === 0) b.style.width = '0'; }, 350); } }, ok ? 250 : 600);
+  }
+}
+let toastTimer = null;
+/** 成功/失败提示：图标 + 消息，自动消失 */
+function toast(msg, isErr, ms) {
+  const t = $('#toast');
+  $('#toastIcon').textContent = isErr ? '✕' : '✓';
+  $('#toastMsg').textContent = msg;
+  t.classList.toggle('err', !!isErr);
+  t.classList.toggle('show', true);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), ms || (isErr ? 4200 : 2400));
+}
+/** 按钮忙碌态包装：执行期间按钮禁用+文字换“动作中…”，结束恢复并弹提示 */
+async function withBusy(btn, doing, action, okMsg, errMsg) {
+  if (btn && btn.dataset.busy) return;
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.dataset.busy = '1'; btn.classList.add('busy'); btn.disabled = true; btn.textContent = doing; }
+  try {
+    const r = await action();
+    if (okMsg) toast(typeof okMsg === 'function' ? okMsg(r) : okMsg);
+    return r;
+  } catch (e) {
+    if (errMsg !== false) toast(typeof errMsg === 'function' ? errMsg(e) : (errMsg || '操作失败: ' + (e && e.message || e)), true);
+    throw e;
+  } finally {
+    if (btn) { delete btn.dataset.busy; btn.classList.remove('busy'); btn.disabled = false; btn.textContent = orig; }
+  }
+}
+
+async function api(path, method, body, tm) {
+  barStart();
+  if (tm) tm.t0 = performance.now();
+  let r, j;
+  const m = method || 'GET';
+  const mkHdr = tok => {
+    const h = {};
+    if (body) h['Content-Type'] = 'application/json';
+    if (tok) h['x-admin-token'] = tok;
+    return Object.keys(h).length ? h : undefined;
+  };
+  const getToken = () => { try { return localStorage.getItem('gw_admin_token') || ''; } catch (e) { return ''; } };
+  try {
+    if (tm) tm.tFetch = performance.now();
+    r = await fetch(path, { method: m, headers: mkHdr(getToken()), body: body ? JSON.stringify(body) : undefined });
+    if (tm) tm.tHead = performance.now();   // fetch 兑现 = 响应头到手
+    // 写操作 401：网关启用了 admin-token（或旧 token 失效）→ 提示输入并重放一次
+    if (r.status === 401 && m !== 'GET') {
+      const t = prompt('管理面写操作需要凭据：输入 admin-token 或 gateway-key（留空取消）');
+      if (t && t.trim()) {
+        try { localStorage.setItem('gw_admin_token', t.trim()); } catch (e) {}
+        r = await fetch(path, { method: m, headers: mkHdr(t.trim()), body: body ? JSON.stringify(body) : undefined });
+      }
+    }
+    j = await r.json().catch(() => ({}));
+    if (tm) tm.tBody = performance.now();   // r.json() 兑现 = body 交付并解析完
+    if (!r.ok) { const e = new Error(j.error || ('HTTP ' + r.status)); e.resp = j; throw e; }
+    return j;
+  } finally {
+    barEnd(r ? r.ok : false);
+  }
+}
+// ================= 按钮数据句柄 + 事件委托（修 #8b） =================
+// 此前按钮 onclick 里内联 JSON.stringify(obj) 与 '${id}' 裸拼：值含 '、" 或 \ 时 JS 语法错误
+// （按钮点了没反应也不报错），上游目录发现的模型名更是现成的存储型 XSS 面。
+// 统一改为：数据入句柄表、按钮只带序号、document 级委托分发。
+const _hx = {};
+let _hseq = 0;
+let _gPids = '';   // 分组弹窗的成员下拉 HTML（openGroupForm 时暂存，替代拼进 onclick 的大字符串）
+function hx(obj) { _hx[++_hseq] = obj; return _hseq; }
+function hr(h) { return _hx[h]; }
+document.addEventListener('click', e => {
+  const b = e.target && e.target.closest ? e.target.closest('[data-hact]') : null;
+  if (!b) return;
+  const d = hr(+b.dataset.h) || {};
+  const F = {
+    chEdit: () => openChannelForm(d.pid, d.ch),
+    chDel:  () => delChannel(d.pid, d.ch.id, b),
+    chAdd:  () => openChannelForm(d.pid),
+    chSave: () => saveChannel(d.pid, d.cid, b),
+    mTest:  () => openTestModel(d.pid, d.m),
+    mEdit:  () => openModelForm(d.pid, d.m),
+    mToggle:() => toggleModel(d.pid, d.m.model, d.m.enabled === false, b),
+    mDel:   () => delModel(d.pid, d.m.model, b),
+    mAdd:   () => openModelForm(d.pid),
+    mSave:  () => saveModel(d.pid, d.origModel, b),
+    umList: () => openUpstreamModels(d.pid, b),
+    pEdit:  () => openProviderForm(d.p),
+    pToggle:() => toggleProv(d.p.id, !d.p.enabled, b),
+    pDel:   () => delProv(d.p.id, b),
+    pSave:  () => saveProvider(d.isEdit, b),
+    discX:  () => toggleDiscovered(d.pid),
+    gEdit:  () => openGroupForm(d.g),
+    gDel:   () => delGroup(d.g.name, b),
+    tRun:   () => runTest(d.pid, d.model, b),
+    mRowAdd:() => addMemberRow(_gPids),
+    traceX: () => toggleTrace(d.trace, b),
+    drillLogs: () => drillToLogs(d),
+    twApply: () => applyToolWeak(d.provider, d.model, b),
+    rkSbx:   () => openRankModal({ model: d.model }, 'sandbox'),
+    rkBalOpen: () => openRankModal(null, 'balance'),
+    rkWhy:   () => openRankModal({ model: d.provider + '/' + d.model }, 'sandbox'),
+    rkTrace: () => showRankTrace(d.tid, b),
+  }[b.dataset.hact];
+  if (F) F();
+});
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  ['providers','usage','logs','sys'].forEach(n => $('#tab-'+n).style.display = n === name ? '' : 'none');
+  if (name === 'usage') { loadUsage(); if (!document.querySelector('#umsel_provider .msel-btn')) loadUsageFilterOptions(); }
+  if (name === 'logs') { perfProbeVersion(); renderPerf(); loadLogs(); if (!document.querySelector('#msel_model .msel-btn')) loadLogFilterOptions(); }
+  if (name === 'sys') { loadAll(); loadProbe(); loadReconcile(); loadRateLimitLearn(); loadToolWeakSuggestions($('#twBtn')); }
+}
+
+// ================= 自适应限流学习（诊断 + 手动重置） =================
+async function loadRateLimitLearn() {
+  try {
+    const d = await api('/api/rate-limit-learn');
+    const tb = $('#rateLimitBody'); tb.innerHTML = '';
+    const fmtC = c => {
+      const r = c?.learnedReqPerMin, t = c?.learnedTokPerMin;
+      return (r > 0 || t > 0) ? `请求≤${r||'-'}/分 · token≤${fmtT(t)||'-'}` : '<span class="dim">未学(无限流)</span>';
+    };
+    for (const [pid, st] of Object.entries(d.providers || {})) {
+      const cur = st.current || {};
+      ap(tb, `<tr><td>${esc(pid)}</td>
+        <td>${fmtC(st.peak)}</td><td>${fmtC(st.low)}</td>
+        <td class="dim">${cur.reqPerMin ?? '-'}/分 · ${fmtT(cur.tokPerMin)}</td><td>${st.confidence || 0}</td>
+        <td><button class="btn mini ghost" onclick="resetRateLimit('${esc(pid)}',this)">重新学习</button></td></tr>`);
+    }
+    if (!Object.keys(d.providers || {}).length) tb.innerHTML = '<tr><td colspan="6" class="dim">暂无学习记录（有请求+触发过限流后会出现在这里）</td></tr>';
+    $('#rateLimitMeta').textContent = `高峰时段 ${d.peakHours||'8-23'} · 每次自动试探放宽 +${d.relaxStepPct||''}% · 429 立即收紧 · 6 小时无流量自动清零重学`;
+  } catch (e) { /* 卡片失败不阻塞系统页 */ }
+}
+async function resetRateLimit(pid, btn) {
+  if (!confirm(`重置 ${pid} 的自适应限流学习？（清空它已学到的上限，重新从零学习）`)) return;
+  await withBusy(btn, '重置中…', () => api('/api/rate-limit-learn/reset', 'POST', { providerId: pid }), '已重置');
+  loadRateLimitLearn();
+}
+
+// 策略中文标签（顶栏 meta 显示用；下拉框 option 文案各自维护）
+const STRAT_LABEL = {
+  auto: 'auto 综合', priority: 'priority 严格优先级', latency: 'latency 速度优先',
+  weighted: 'weighted 加权随机', 'cost-first': 'cost-first 费用优先',
+  'free-only': 'free-only 只走免费（允许失败）', 'paid-only': 'paid-only 只走付费（快稳准）',
+};
+
+// ================= 供应商渲染（模型清单并入卡片） =================
+async function loadAll(manual) {
+  ov = await api('/api/overview');
+  $('#meta').textContent = `策略:${STRAT_LABEL[ov.strategy] || ov.strategy} · 目录:${ov.catalogSize} 模型 · ${new Date(ov.configLoadedAt).toLocaleTimeString()}`;
+  $('#strategy').value = ov.strategy;
+  renderProviders();
+  renderGroups();
+  renderRuntime();
+  if (manual) toast('已刷新');
+}
+function renderProviders() {
+  const box = $('#providerCards'); box.innerHTML = '';
+  const rt = ov.runtime || {};
+  const chMap = {}; (rt.channels || []).forEach(c => chMap[c.provider + '\n' + c.channel] = c);
+
+  for (const p of ov.providers) {
+    const card = document.createElement('div'); card.className = 'card';
+    // 评分沙盘的预填点名：该家第一个启用的模型
+    const rkM = (p.models || []).find(m => m.enabled !== false);
+    const rkModel = rkM ? p.id + '/' + rkM.model : 'free-fast';
+    // 渠道行
+    let chRows = '';
+    for (const ch of p.channels) {
+      const cr = chMap[p.id + '\n' + ch.id];
+      const st = cr && cr.coolDownUntil > Date.now() ? '<span class="tag warn">冷却中</span>' : '<span class="tag ok">可用</span>';
+      // 今日该 Key 实流量恒显（内存日计数器，重启清零）：一家多把 Key 时一眼看出有没有偏斜
+      const today = `<span class="dim" title="今日这把 Key 的实请求/实 token（内存日计数器，重启清零；历史窗口看用量页「按 Key 用量」）">今日 ${ch.todayRequests ?? 0} 次 · ${fmtT(ch.todayTokens ?? 0)} tok</span>`;
+      chRows += `<div class="row"><span>${esc(ch.id)} <span class="dim">${esc(ch.keyMasked)}</span> ${today}</span>
+        <span>${st} ${ch.enabled?'':'<span class="tag err">已停</span>'}
+        <button class="btn mini ghost" data-hact="chEdit" data-h="${hx({pid:p.id, ch})}">编辑</button>
+        ${p.channels.length>1?`<button class="btn mini err" data-hact="chDel" data-h="${hx({pid:p.id, ch})}">删</button>`:''}</span></div>`;
+    }
+    // 模型行（含增删改 + 测试连通）；自动发现的大清单默认折叠
+    const managed = (p.models || []).filter(m => m.source !== 'discovered');
+    const discovered = (p.models || []).filter(m => m.source === 'discovered');
+    const expandId = 'disc_' + p.id;
+    const showAll = !!expandedModels[p.id];
+    const discShown = showAll ? discovered : discovered.slice(0, 3);
+    const modelRow = m => {
+      const srcTag = m.source === 'discovered' ? '<span class="tag warn" title="目录自动发现">自动</span>' : '';
+      const off = m.enabled === false;   // 模型级停用：不参与路由/巡检/列表展示
+      return `<div class="mrow" ${off?'style="opacity:.55"':''}>
+        <div style="flex:1;min-width:0">
+          <div class="mname">${esc(m.model)}${off?' <span class="tag err">已停用</span>':''}</div>
+          <div class="mtags">${srcTag}
+            <span class="dim">P${m.priority} · ${esc(m.costTier)}</span>
+            ${m.dailyTokenLimit ? `<span class="dim">日限${fmtT(m.dailyTokenLimit)}</span>` : ''}
+            ${m.alias ? `<span class="dim" title="请求此名，转发为上游别名">alias:${esc(m.alias)}</span>` : ''}
+            ${m.category ? `<span class="tag warn" title="语义路由：此类请求优先走它">${categoryLabel(m.category)}</span>` : ''}
+            <span class="tag ${m.codeScore!=null?'cap':'dim'}" title="编码能力分：代码类请求按此分优先选中（0~10，越高越优先，并按费用档算性价比）。—=未设，不参与">编码 ${m.codeScore!=null?m.codeScore:'—'}</span>
+            <span class="tag ${m.userWeight!=null&&m.userWeight!==1?'cap':'dim'}" title="用户权重：对评分做乘法微调（对所有请求生效）。>1 拔高、<1 压低、×1.0 中性">权重 ×${m.userWeight ?? '1.0'}</span>
+            <span class="tag ${m.toolWeak?'err':'dim'}" title="工具调用能力：带 tools 的 Agent 请求里，标'弱'的模型会被降权排后（不剔除），减少'只回总结不回工具'的静默收尾。正常=不降权">工具 ${m.toolWeak?'弱':'正常'}</span>
+            <span class="tag ${m.excludeFromProbe?'warn':'dim'}" title="定时巡检：'豁免'=不参与定时探测（省下其免费硬顶额度），代价是空闲时无新鲜样本、熔断恢复只靠真实流量。常规=正常巡检">巡检 ${m.excludeFromProbe?'豁免':'常规'}</span>
+            ${m.contextWindow ? `<span class="dim" title="上下文窗口上限：输入估算超过此值的请求会改路由到接得住的家">窗口 ${Math.round(m.contextWindow / 1000)}K</span>` : '<span class="tag warn" title="未标注上下文窗口上限：超长请求只能等上游 400 才发现。建议在编辑弹窗填入真实窗口（如 128K=131072）">窗口未标注</span>'}
+            ${m.requestsToday ? `<span class="dim">今日${m.requestsToday}次/${fmtT(m.tokensToday)}tok</span>` : ''}</div>
+        </div>
+        <div class="mops">
+          <button class="btn mini" data-hact="mTest" data-h="${hx({pid:p.id, m})}">测试</button>
+          <button class="btn mini ghost" data-hact="mEdit" data-h="${hx({pid:p.id, m})}">编辑</button>
+          <button class="btn mini ${off?'ghost':'warn'}" title="${off?'恢复参与路由':'停用该模型（路由/巡检/模型列表都会跳过，供应商其它模型不受影响）'}" data-hact="mToggle" data-h="${hx({pid:p.id, m})}">${off?'启用':'停用'}</button>
+          <button class="btn mini err" data-hact="mDel" data-h="${hx({pid:p.id, m})}">删</button>
+        </div></div>`;
+    };
+    let modelRows = managed.map(modelRow).join('') + discShown.map(modelRow).join('');
+    if (discovered.length > 3)
+      modelRows += `<div style="padding:2px 6px"><button class="btn mini ghost" data-hact="discX" data-h="${hx({pid:p.id})}">${showAll ? '收起' : `+ 展开其余 ${discovered.length - 3} 个自动发现模型`}</button></div>`;
+    card.innerHTML = `
+      <h3>${esc(p.name)} <span style="display:flex;gap:6px;align-items:center">
+        <span class="tag ${p.enabled?'ok':'err'}">${p.enabled?'启用':'停用'}</span>
+        <button class="btn mini ghost" title="实时拉取该供应商 /v1/models 核对配置" data-hact="umList" data-h="${hx({pid:p.id})}">查上游</button>
+        <button class="btn mini ghost" title="评分沙盘：看该供应商的模型在这次请求评分里排第几、被哪个因子拉下来" data-hact="rkSbx" data-h="${hx({pid:p.id, model:rkModel})}">评分</button>
+        <button class="btn mini ghost" data-hact="pEdit" data-h="${hx({p})}">编辑</button>
+        <button class="btn mini ${p.enabled?'warn':'ghost'}" data-hact="pToggle" data-h="${hx({p})}">${p.enabled?'停用':'启用'}</button>
+        <button class="btn mini err" data-hact="pDel" data-h="${hx({p})}">删</button></span></h3>
+      <div class="row"><span class="dim">ID / 协议</span><span>${esc(p.id)} · ${esc(p.protocol)}</span></div>
+      <div class="row"><span class="dim">baseUrl</span><span style="word-break:break-all">${esc(p.baseUrl)}</span></div>
+      <div class="row"><span class="dim">优先级/费用档</span><span>P${p.priority} · ${esc(p.costTier)}</span></div>
+      <div style="margin-top:8px"><span class="dim" style="font-size:12px">渠道（Key 池）</span>${chRows}
+        <button class="btn mini ghost" data-hact="chAdd" data-h="${hx({pid:p.id})}">+ 添加渠道</button></div>
+      <div style="margin-top:8px"><span class="dim" style="font-size:12px">模型（${(p.models||[]).length}）
+        <button class="btn mini ghost" data-hact="mAdd" data-h="${hx({pid:p.id})}">+ 添加模型</button></span>
+        ${modelRows || '<div class="dim" style="padding:4px 0">无模型</div>'}</div>`;
+    box.appendChild(card);
+  }
+  // 今日用量小卡片
+  const u = ov.usage || [];
+  const uc = document.createElement('div'); uc.className = 'card';
+  uc.innerHTML = `<h3>今日用量（${ov.today}）</h3>` + (u.map(x =>
+    `<div class="row"><span>${esc(x.provider)} / ${esc(x.model)}</span><span class="dim">${x.requests}次 ${fmtT(x.tokensIn+x.tokensOut)} tok</span></div>`).join('') || '<div class="dim">暂无</div>');
+  box.appendChild(uc);
+}
+function renderGroups() {
+  const tb = $('#groupBody'); tb.innerHTML = '';
+  if (!(ov.groups||[]).length) { tb.innerHTML = '<tr><td colspan="4" class="dim">无分组</td></tr>'; return; }
+  for (const g of ov.groups) {
+    const ms = g.autoAll ? '<span class="tag ok">全部手工模型（动态）</span>'
+      : g.members.map(m => `${esc(m.providerId)}/${esc(m.model)}(P${m.priority})`).join('、');
+    ap(tb, `<tr><td>${esc(g.name)}</td><td>${g.autoAll?'<span class="tag ok">自动组</span>':'<span class="dim">静态组</span>'}</td>
+      <td style="white-space:normal">${ms}</td>
+      <td><button class="btn mini ghost" data-hact="gEdit" data-h="${hx({g})}">编辑</button>
+      <button class="btn mini err" data-hact="gDel" data-h="${hx({g})}">删</button></td></tr>`);
+  }
+}
+function renderRuntime() {
+  const tb = $('#runtimeBody'); tb.innerHTML = '';
+  const now = Date.now();
+  for (const e of (ov.runtime?.entries) || []) {
+    // #15 熔断倒计时：OPEN 时把剩余冷却秒数直接显示在状态标签旁（轮询自然刷新，无需额外定时器）
+    const remain = e.coolDownUntil ? e.coolDownUntil - now : 0;
+    const cd = (e.state === 'OPEN' && remain > 0)
+      ? ` <span class="dim" style="font-size:11px">${Math.ceil(remain / 1000)}s</span>` : '';
+    const st = (e.state === 'CLOSED' ? '<span class="tag ok">正常</span>'
+      : e.state === 'OPEN' ? '<span class="tag err">熔断</span>'
+      : '<span class="tag warn">半开</span>') + cd;
+    const tps = e.ewmaTokensPerSec != null ? e.ewmaTokensPerSec + ' tok/s' : '—';
+    ap(tb, `<tr><td>${esc(e.provider)}</td><td>${esc(e.model)}</td><td>${st}</td>
+      <td>${fmt(e.ewmaTtftMs)}</td><td>${fmt(e.recentTtftMedian)}</td><td class="dim">${tps}</td><td>${e.consecutiveFailures}</td><td class="dim" style="max-width:260px;overflow:hidden;text-overflow:ellipsis" title="${esc(e.lastError ?? '')}">${esc(e.lastError ?? '')}</td></tr>`);
+  }
+  renderEarlyStop();
+  renderClientQueue();
+}
+// #15 早停惩罚中子表：runtimeView.earlyStopSuspects（client×模型在惩罚窗口内被降权——"为什么这家突然排后"）
+function renderEarlyStop() {
+  const box = $('#earlyStopCard'); if (!box) return;
+  const tb = $('#earlyStopBody'); tb.innerHTML = '';
+  const list = (ov.runtime?.earlyStopSuspects) || [];
+  if (!list.length) { box.style.display = 'none'; return; }
+  box.style.display = '';
+  for (const s of list) {
+    ap(tb, `<tr><td>${esc(s.client)}</td><td>${esc(s.provider)}</td><td>${esc(s.model)}</td>
+      <td>${fmt(s.remainingMs)}</td></tr>`);
+  }
+}
+// #15 同源并发队列只读卡：/api/client-queue（端点此前零入口的孤儿诊断接口）
+async function renderClientQueue(force) {
+  const box = $('#clientQueueCard'); if (!box) return;
+  let d; try { d = await api('/api/client-queue'); } catch (e) { if (force) toast('队列读取失败: ' + e.message, 'err'); return; }
+  const tb = $('#cqBody'); tb.innerHTML = '';
+  box.style.display = '';
+  const clients = d.clients || {};
+  const keys = Object.keys(clients);
+  if (!d.enabled) {
+    $('#cqMeta').textContent = '并发队列未启用（clientMaxConcurrency=0：不限制单工具并发）';
+    tb.innerHTML = '<tr><td colspan="3" class="dim">队列关闭，无排队</td></tr>';
+    return;
+  }
+  $('#cqMeta').textContent = `全局并发上限 ${d.maxConcurrency} · 排队等待 ${fmt(d.waitMs)} · 当前 ${keys.length} 个工具有并发记录`;
+  for (const k of keys) {
+    const c = clients[k];
+    const wt = c.waiting > 0 ? `<span class="tag warn">排队 ${c.waiting}</span>` : '<span class="dim">0</span>';
+    ap(tb, `<tr><td>${esc(k)}</td><td>${c.max ?? d.maxConcurrency}</td><td>${wt}</td></tr>`);
+  }
+  if (!keys.length) tb.innerHTML = '<tr><td colspan="3" class="dim">暂无并发中/排队中的工具请求</td></tr>';
+}
+
+// ================= 压缩链路一键体检（SelfCheck） =================
+let _scTimer = null;
+async function selfCheckRun(btn) {
+  let r;
+  try { r = await api('/api/selfcheck/run', 'POST'); }
+  catch (e) { toast('启动体检失败: ' + e.message, 'err'); return; }
+  if (!r.started) toast('已有一轮体检正在进行中', 'warn');
+  if (btn) { btn.disabled = true; btn.textContent = '体检中…'; }
+  $('#scBody').innerHTML = '<span class="dim">体检已启动，正在串行执行（约 1~2 分钟）…</span>';
+  pollSelfCheck(btn);
+}
+function pollSelfCheck(btn) {
+  if (_scTimer) clearInterval(_scTimer);
+  _scTimer = setInterval(async () => {
+    let d; try { d = await api('/api/selfcheck/status'); } catch (e) { return; }
+    renderSelfCheck(d);
+    if (!d.running && (d.state === 'done' || d.state === 'error' || d.state === 'idle')) {
+      clearInterval(_scTimer); _scTimer = null;
+      if (btn) { btn.disabled = false; btn.textContent = '开始体检'; }
+    }
+  }, 2000);
+}
+function renderSelfCheck(d) {
+  const box = $('#scBody'); if (!box) return;
+  let h = '';
+  if (d.state === 'running') h += `<div>体检进行中：<b>${esc(d.phase || '')}</b>…</div>`;
+  if (d.error) h += `<div style="color:var(--err)">体检异常：${esc(d.error)}</div>`;
+  const v = d.verdict;
+  if (v) {
+    const col = v.level === 'error' ? 'var(--err)' : v.level === 'warn' ? 'var(--warn)' : 'var(--ok)';
+    h += `<div style="color:${col};font-weight:600;margin:4px 0">结论：${esc(v.text)}</div>`;
+  }
+  const p = d.probe;
+  if (p) {
+    let fails = '';
+    if (Array.isArray(p.failed) && p.failed.length)
+      fails = '，失败：' + p.failed.slice(0, 8).map(f => esc(f.provider + '/' + f.model)).join('、');
+    h += `<div class="dim">① 上游探测：${p.ok || 0}/${p.total || 0} 免费模型健康${p.lastRoundAt ? `（${esc(p.lastRoundAt)}）` : ''}${fails}</div>`;
+  }
+  const c = d.compress;
+  if (c) {
+    if (c.skipped) h += `<div class="dim">② 压缩干跑：已跳过（${esc(c.note || '')}）</div>`;
+    else {
+      const cc = c.ok ? 'var(--ok)' : 'var(--err)';
+      h += `<div style="color:${cc}">② 压缩干跑：${c.ok ? '通过' : '不可用'} · 压缩模型 ${esc(c.compressorModel || '')} · ${esc(c.path || '')} · 摘要 ${c.summaryChars || 0} 字 · ${c.costMs || 0}ms</div>`;
+      if (c.note) h += `<div class="dim" style="margin-left:12px">${esc(c.note)}</div>`;
+    }
+  }
+  const t = d.toolTest;
+  if (Array.isArray(t) && t.length) {
+    const ts = d.toolSummary || {};
+    h += `<div class="dim" style="margin-top:4px">③ 工具调用测试：${ts.withToolCalls || 0}/${ts.total || 0} 个免费模型能发起工具调用（✗ 仅作参考，不自动改路由）</div>`;
+    h += '<table><thead><tr><th>供应商</th><th>模型</th><th>工具调用</th><th>finish</th><th>耗时</th><th>备注</th></tr></thead><tbody>';
+    for (const r of t) {
+      const ok = r.toolCalls ? '<span class="tag ok">✓ 能调</span>' : '<span class="tag warn">✗ 未调</span>';
+      h += `<tr><td>${esc(r.provider)}</td><td>${esc(r.model)}</td><td>${ok}</td><td class="dim">${esc(r.finishReason || '')}</td><td>${fmt(r.costMs)}</td><td class="dim" style="max-width:220px;overflow:hidden;text-overflow:ellipsis">${esc(r.error || '')}</td></tr>`;
+    }
+    h += '</tbody></table>';
+  }
+  if (!h) h = esc(d.note || '准备中…');
+  box.innerHTML = h;
+}
+
+// ================= #33 toolWeak 自动学习建议 =================
+async function loadToolWeakSuggestions(btn) {
+  const box = $('#twBody'); if (!box) return;
+  if (btn) { btn.disabled = true; btn.textContent = '读取中…'; }
+  let d;
+  try { d = await api('/api/tool-weak-suggestions'); }
+  catch (e) { box.innerHTML = `<span style="color:var(--err)">读取失败：${esc(e.message)} <button class="btn mini" onclick="loadToolWeakSuggestions()">重试</button></span>`; if (btn){btn.disabled=false;btn.textContent='刷新';} return; }
+  renderToolWeak(d);
+  if (btn) { btn.disabled = false; btn.textContent = '刷新'; }
+}
+function renderToolWeak(d) {
+  const box = $('#twBody'); if (!box) return;
+  const sug = d.suggestions || [], contra = d.contradictions || [];
+  const thr = d.threshold ?? 20;
+  let h = '';
+  if (!sug.length && !contra.length) {
+    box.innerHTML = `<span class="dim">暂无建议：还没有模型达到"带 tools 请求≥${thr} 且从未回 tool_calls"的阈值（样本在真实流量里持续积累）。</span>`;
+    return;
+  }
+  if (sug.length) {
+    h += `<div style="margin-bottom:4px">建议标记 toolWeak（样本≥${thr} 且从未回过工具调用；点确认才写回配置）：</div>`;
+    h += '<table><thead><tr><th>供应商</th><th>模型</th><th>带tools样本</th><th></th></tr></thead><tbody>';
+    for (const s of sug) {
+      h += `<tr><td>${esc(s.provider)}</td><td>${esc(s.model)}</td><td>${s.samples}</td>
+        <td><button class="btn mini" data-hact="twApply" data-h="${hx({provider:s.provider, model:s.model})}">标记 toolWeak</button></td></tr>`;
+    }
+    h += '</tbody></table>';
+  }
+  if (contra.length) {
+    h += `<div class="dim" style="margin-top:8px">反证（已标 toolWeak 却又真实回过工具调用，请人工复核是否摘标——不自动摘）：` +
+      contra.map(c => `${esc(c.provider + '/' + c.model)}（标记后已回 ${c.toolCallsSinceMark} 次）`).join('、') + '</div>';
+  }
+  box.innerHTML = h;
+}
+async function applyToolWeak(provider, model, btn) {
+  if (!confirm(`确认把 ${provider}/${model} 标记为 toolWeak？\n该模型在"带 tools 请求"上会被排后（不剔除、不影响普通聊天），随时可在模型编辑里取消。`)) return;
+  if (btn) { btn.disabled = true; btn.textContent = '写入中…'; }
+  try {
+    await api('/api/routing', 'POST', { providerId: provider, model, toolWeak: true });
+    toast('已标记 toolWeak: ' + provider + '/' + model);
+    loadToolWeakSuggestions();
+  } catch (e) {
+    toast('标记失败: ' + e.message, 'err');
+    if (btn) { btn.disabled = false; btn.textContent = '标记 toolWeak'; }
+  }
+}
+
+// ================= 模型巡检（定时探测） =================
+async function loadProbe() {
+  try {
+    const d = await api('/api/probe');
+    const tb = $('#probeBody'); tb.innerHTML = '';
+    for (const r of d.results || []) {
+      const ok = r.ok ? '<span class="tag ok">健康</span>' : '<span class="tag err">异常</span>';
+      ap(tb, `<tr><td>${esc(r.provider)}</td><td>${esc(r.model)}</td><td>${ok}</td>
+        <td>${fmt(r.ttftMs)}</td><td>${fmt(r.costMs)}</td><td class="dim">${r.tokensIn ?? '-'}+${r.tokensOut ?? '-'}</td>
+        <td class="dim" style="max-width:260px;overflow:hidden;text-overflow:ellipsis" title="${esc(r.error ?? '')}">${esc(r.error ?? '')}</td></tr>`);
+    }
+    if (!(d.results || []).length) tb.innerHTML = '<tr><td colspan="7" class="dim">暂无巡检记录（等下一轮或点"立即巡检"）</td></tr>';
+    $('#probeMeta').textContent = d.lastRoundAt
+      ? `最近巡检 ${d.lastRoundAt} · 自动间隔 ${d.intervalMinutes} 分钟 · 巡检请求也会记入请求日志（client=probe，可在日志页按"来源工具"筛 probe 查看历史）`
+      : `自动间隔 ${d.intervalMinutes ?? '?'} 分钟（刚启动，等第一轮）`;
+  } catch (e) { /* 巡检卡片失败不阻塞系统页 */ }
+}
+async function probeRun(btn) {
+  await withBusy(btn, '巡检中…（串行探测每个免费模型，约需几十秒）', async () => {
+    await api('/api/probe/run', 'POST');
+    toast('巡检完成');
+  }, false);
+  loadProbe();
+}
+
+// ================= 模型自动停用/恢复（ModelReconciler） =================
+function setRcBtn(on) {
+  const b = $('#rcBtn'); if (!b) return;
+  b.textContent = on ? '已开启·点击关闭' : '已关闭·点击开启';
+  b.classList.toggle('ghost', !on);
+}
+async function loadReconcile() {
+  try {
+    const d = await api('/api/reconcile');
+    const tb = $('#rcBody'); tb.innerHTML = '';
+    for (const a of d.actions || []) {
+      const cls = a.action === '永久停用' ? 'err' : a.action === '临时停用' ? 'warn' : a.action === '恢复启用' ? 'ok' : 'dim';
+      const undo = a.action === '永久停用'
+        ? `<button class="btn mini ghost" onclick="reconcileUndo('${esc(a.provider)}','${esc(a.model)}',this)">撤销停用</button>` : '';
+      ap(tb, `<tr><td>${esc(a.provider)}</td><td>${esc(a.model)}</td>
+        <td><span class="tag ${cls}">${esc(a.action)}</span></td><td>${esc(a.result||'')}</td>
+        <td class="dim" style="max-width:240px">${esc(a.detail||'')}</td><td class="dim">${esc(a.at||'')}</td><td>${undo}</td></tr>`);
+    }
+    for (const t of d.tempDisabled || []) {
+      ap(tb, `<tr><td>${esc(t.provider)}</td><td>${esc(t.model)}</td>
+        <td><span class="tag warn">临时停用中</span></td><td colspan="3" class="dim">余额/额度不足，次日额度刷新或调通后自动恢复</td><td></td></tr>`);
+    }
+    const seen = new Set((d.actions || []).map(a => a.provider + '\n' + a.model));
+    for (const a of d.autoDisabledNow || []) {
+      if (seen.has(a.provider + '\n' + a.model)) continue;   // 本轮已列过的不重复
+      ap(tb, `<tr><td>${esc(a.provider)}</td><td>${esc(a.model)}</td>
+        <td><span class="tag err">永久停用中</span></td><td colspan="3" class="dim">本器确认“模型不存在”后停用，已从路由剔除；上游重新上架或点撤销即恢复</td>
+        <td><button class="btn mini ghost" onclick="reconcileUndo('${esc(a.provider)}','${esc(a.model)}',this)">撤销停用</button></td></tr>`);
+    }
+    if (!(d.actions || []).length && !(d.tempDisabled || []).length && !(d.autoDisabledNow || []).length)
+      tb.innerHTML = '<tr><td colspan="7" class="dim">暂无动作（开关关闭或还没扫到该动的模型；点“立即扫描一轮”试一次）</td></tr>';
+    setRcBtn(!!d.enabled);
+    const active = document.activeElement;
+    if (active !== $('#rcInterval')) $('#rcInterval').value = d.intervalMinutes ?? 60;
+    if (active !== $('#rcMinFail')) $('#rcMinFail').value = d.minFailures ?? 2;
+    if (active !== $('#rcBudget')) $('#rcBudget').value = d.probeBudget ?? 5;
+    $('#rcMeta').textContent = d.lastRoundAt
+      ? `最近扫描 ${d.lastRoundAt} · ${d.enabled?'已开启':'已关闭'} · 间隔 ${d.intervalMinutes} 分 · 确认探测以 client=reconcile 记入请求日志`
+      : `${d.enabled?'已开启':'已关闭'} · 尚未扫描过（开启后启动约 100s 开始第一轮）`;
+  } catch (e) { /* 卡片失败不阻塞系统页 */ }
+}
+async function toggleReconcile(btn) {
+  const targetOn = $('#rcBtn').classList.contains('ghost');   // ghost=当前关闭态 → 点击即开启
+  await withBusy(btn, '保存中…', async () => {
+    await api('/api/reconcile/toggle', 'POST', { enabled: targetOn });
+    toast(targetOn ? '自动停用器已开启' : '自动停用器已关闭');
+  }, false);
+  loadReconcile();
+}
+async function saveReconcileParams(btn) {
+  const payload = {
+    intervalMinutes: parseInt($('#rcInterval').value || '0', 10),
+    minFailures: parseInt($('#rcMinFail').value || '1', 10),
+    probeBudget: parseInt($('#rcBudget').value || '0', 10),
+  };
+  await withBusy(btn, '保存中…', async () => { await api('/api/reconcile/toggle', 'POST', payload); toast('参数已保存'); }, false);
+  loadReconcile();
+}
+async function reconcileRun(btn) {
+  await withBusy(btn, '扫描中…（实时拉上游列表 + 确认探测，约需几十秒）', async () => {
+    await api('/api/reconcile/run', 'POST'); toast('扫描完成');
+  }, false);
+  loadReconcile();
+}
+async function reconcileUndo(pid, model, btn) {
+  await withBusy(btn, '撤销中…', async () => {
+    await api('/api/reconcile/undo', 'POST', { provider: pid, model }); toast('已撤销停用');
+  }, false);
+  loadReconcile();
+}
+
+// ================= 表单弹窗 =================
+function closeModal() { $('#modalBg').style.display = 'none'; }
+function openModal(html, wide) { const b = $('#modalBox'); b.className = 'modal' + (wide ? ' wide' : ''); b.innerHTML = html; $('#modalBg').style.display = 'flex'; }
+
+function openProviderForm(p) {
+  p = p || {};
+  openModal(`<h3>${p.id?'编辑供应商':'新增供应商'}</h3>
+    <div class="form-row"><label>ID(唯一)</label><input id="f_id" value="${esc(p.id||'')}" ${p.id?'disabled':''}></div>
+    <div class="form-row"><label>名称</label><input id="f_name" value="${esc(p.name||'')}" placeholder="显示名"></div>
+    <div class="form-row"><label>baseUrl</label><input id="f_baseUrl" value="${esc(p.baseUrl||'')}" placeholder="https://api.xxx.com/v1"></div>
+    <div class="form-row"><label>协议</label><select id="f_protocol">
+      <option value="openai" ${p.protocol!=='anthropic'?'selected':''}>openai（兼容直通）</option>
+      <option value="anthropic" ${p.protocol==='anthropic'?'selected':''}>anthropic（自动转换）</option></select></div>
+    <div class="form-row"><label>优先级</label><input id="f_priority" type="number" value="${p.priority ?? 5}"> <span class="dim">小者优先</span></div>
+    <div class="form-row"><label>费用档</label><select id="f_costTier">${['free','low','standard','premium'].map(t=>`<option ${p.costTier===t?'selected':''}>${t}</option>`).join('')}</select></div>
+    <div class="form-row"><label>apiKey</label><input id="f_apiKey" value="" placeholder="${p.id?'留空=不修改':'sk-...'}"></div>
+    <div class="form-row"><label>代理(可选)</label><input id="f_proxy" value="${esc(p.proxy||'')}" placeholder="http://host:port"></div>
+    <div class="form-row" style="align-items:flex-start"><label>思考模式</label><div style="flex:1;min-width:0">
+      <select id="f_thinkingMode" style="width:100%">
+      <option value="auto" ${(p.thinkingMode||'auto')==='auto'?'selected':''}>跟随（默认：已知名单关思考，其余不动）</option>
+      <option value="disable" ${p.thinkingMode==='disable'?'selected':''}>一律关思考（该家默认开思考时用）</option></select>
+      <div class="dim" style="margin-top:4px">"跟随"下若该家因默认开思考拒绝请求（要求回传 reasoning_content），网关会自动关思考重发一次；想让它一开始就关思考、少绕一次，选"一律关思考"。</div></div></div>
+    <div class="form-actions"><button class="btn ghost" onclick="closeModal()">取消</button>
+      <button class="btn" data-hact="pSave" data-h="${hx({isEdit: !!p.id})}">保存</button></div>`);
+}
+async function saveProvider(isEdit, btn) {
+  await withBusy(btn, '保存中…', async () => {
+    const body = {
+      name: v('#f_name'), baseUrl: v('#f_baseUrl'), protocol: v('#f_protocol'),
+      priority: +v('#f_priority'), costTier: v('#f_costTier'), proxy: v('#f_proxy') || undefined,
+      thinkingMode: v('#f_thinkingMode') || 'auto'
+    };
+    const key = v('#f_apiKey');
+    if (key) body.apiKey = key;
+    if (isEdit) await api('/api/providers/' + encodeURIComponent(curEditIdFromModal()), 'PUT', body);
+    else { body.id = v('#f_id'); await api('/api/providers', 'POST', body); }
+    closeModal(); await loadAll();
+  }, false);
+}
+function curEditIdFromModal() { return $('#f_id').value; }
+
+function openChannelForm(pid, ch) {
+  ch = ch || {};
+  openModal(`<h3>${ch.id?'编辑渠道':'添加渠道'}（${esc(pid)}）</h3>
+    <div class="form-row"><label>Key</label><input id="f_apiKey" value="" placeholder="${ch.id?'留空=不修改':'sk-...'}"></div>
+    <div class="form-row"><label>权重</label><input id="f_weight" type="number" value="${ch.weight ?? 1}"></div>
+    <div class="form-actions"><button class="btn ghost" onclick="closeModal()">取消</button>
+      <button class="btn" data-hact="chSave" data-h="${hx({pid, cid: ch.id || null})}">保存</button></div>`);
+}
+async function saveChannel(pid, cid, btn) {
+  await withBusy(btn, '保存中…', async () => {
+    const body = { weight: +v('#f_weight') };
+    const key = v('#f_apiKey'); if (key) body.apiKey = key;
+    if (cid) await api(`/api/providers/${pid}/channels/${cid}`, 'PUT', body);
+    else await api(`/api/providers/${pid}/channels`, 'POST', body);
+    closeModal(); toast('渠道已保存'); await loadAll();
+  }, false);
+}
+
+function openModelForm(pid, m) {
+  m = m || {};
+  openModal(`<h3>${m.model?'编辑模型':'添加模型'}（${esc(pid)}）</h3>
+    <div class="form-row"><label>模型名</label><input id="f_model" value="${esc(m.model||'')}" placeholder="如 deepseek-v4-flash"></div>
+    ${m.model ? '<div class="form-row"><label>改名(可选)</label><input id="f_newModel" value="" placeholder="留空不改名"></div>' : ''}
+    <div class="form-row"><label>优先级覆盖</label><input id="f_priority" type="number" value="${m.priority ?? ''}" placeholder="留空=继承供应商"></div>
+    <div class="form-row"><label>费用档</label><select id="f_costTier"><option></option>${['free','low','standard','premium'].map(t=>`<option ${m.costTier===t?'selected':''}>${t}</option>`).join('')}</select></div>
+    <div class="form-row"><label>日Token限</label><input id="f_limit" type="number" value="${m.dailyTokenLimit ?? ''}" placeholder="留空=不限"></div>
+    <div class="form-row"><label>别名alias</label><input id="f_alias" value="${esc(m.alias||'')}" placeholder="上游真实模型名(可选)"></div>
+    <div class="form-row"><label>上下文上限</label><input id="f_contextWindow" type="number" value="${m.contextWindow ?? ''}" placeholder="留空=不限(按token)"></div>
+    <div class="fhint">请求输入估算超过此值会自动跳过该模型（单位 token，如 128K 填 131072）</div>
+    <div class="form-row"><label>代码能力分</label><input id="f_codeScore" type="number" step="0.1" min="0" max="10" value="${m.codeScore ?? ''}" placeholder="0~10，留空=不参与"></div>
+    <div class="fhint">代码类请求按此分优先选中（越高越容易选中），并按费用档自动算性价比</div>
+    <div class="form-row"><label>用户权重</label><input id="f_userWeight" type="number" step="0.1" min="0.1" max="10" value="${m.userWeight ?? ''}" placeholder="0.1~10，留空=1.0中性"></div>
+    <div class="fhint">&gt;1 拔高该模型优先级，&lt;1 压低（乘法生效，对所有请求有效）；1.0=中性</div>
+    <div class="form-row"><label>自动组</label><label class="ck"><input id="f_exclude" type="checkbox" ${m.excludeFromAutoAll ? 'checked' : ''}> <span>不进 free-fast 自动组（勾选=排除）</span></label></div>
+    <div class="fhint">图像/视频等专用模型勾选：free-fast 自动组会跳过它，避免被当通用文本模型选中</div>
+    <div class="form-row"><label>工具能力</label><label class="ck"><input id="f_toolWeak" type="checkbox" ${m.toolWeak ? 'checked' : ''}> <span>工具调用能力弱（勾选=降权排后）</span></label></div>
+    <div class="fhint">带 tools 的 Agent 请求会把该模型排后（不剔除、不影响普通聊天），减少"只回总结、不回工具调用"的静默收尾；不勾=正常参与</div>
+    <div class="form-row"><label>定时探测</label><label class="ck"><input id="f_probeExempt" type="checkbox" ${m.excludeFromProbe ? 'checked' : ''}> <span>豁免定时巡检（勾选=不探测）</span></label></div>
+    <div class="fhint">配额硬顶的免费模型（如 openrouter/free 每天仅 ~50 次）勾选：定时探测不再烧它的真实额度；代价是空闲时不再有新鲜样本、熔断恢复只能靠真实流量</div>
+    <div class="form-actions"><button class="btn ghost" onclick="closeModal()">取消</button>
+      <button class="btn" data-hact="mSave" data-h="${hx({pid, origModel: m.model || null})}">保存</button></div>`);
+}
+async function saveModel(pid, origModel, btn) {
+  await withBusy(btn, '保存中…', async () => {
+    const body = {
+      priority: v('#f_priority') === '' ? null : +v('#f_priority'),
+      costTier: v('#f_costTier') || null,
+      dailyTokenLimit: v('#f_limit') === '' ? null : +v('#f_limit'),
+      alias: v('#f_alias') || null,
+      contextWindow: v('#f_contextWindow') === '' ? null : +v('#f_contextWindow'),
+      codeScore: v('#f_codeScore') === '' ? null : +v('#f_codeScore'),
+      userWeight: v('#f_userWeight') === '' ? null : +v('#f_userWeight'),
+      excludeFromAutoAll: document.getElementById('f_exclude') ? document.getElementById('f_exclude').checked : false,
+      toolWeak: document.getElementById('f_toolWeak') ? document.getElementById('f_toolWeak').checked : false,
+      excludeFromProbe: document.getElementById('f_probeExempt') ? document.getElementById('f_probeExempt').checked : false
+    };
+    if (origModel) {
+      body.model = origModel;
+      const nm = v('#f_newModel');
+      if (nm) body.newModel = nm;
+      // 模型名可含 /（如 z-ai/glm-5.3-free），encodeURIComponent 会变 %2F 被 Tomcat 拒 400，
+      // 故模型名走请求体
+      await api(`/api/providers/${pid}/models/update`, 'POST', body);
+    } else {
+      body.model = v('#f_model');
+      await api(`/api/providers/${pid}/models`, 'POST', body);
+    }
+    closeModal(); toast('模型已保存'); await loadAll();
+  }, false);
+}
+async function delModel(pid, model, btn) { if (!confirm(`删除模型 ${model}？（连同其路由条目、分组成员引用）`)) return;
+  await withBusy(btn, '删除中…', async () => {
+    // 模型名可含 /，走请求体（DELETE 路径版对 %2F 会 400）
+    await api(`/api/providers/${pid}/models/delete`, 'POST', { model });
+    toast('模型已删除'); await loadAll();
+  }, false); }
+// 模型级启停（比供应商启停细一档：只停这一个模型，同供应商其它模型照常路由）
+async function toggleModel(pid, model, enable, btn) {
+  await withBusy(btn, '切换中…', async () => {
+    await api(`/api/providers/${pid}/models/set-enabled`, 'POST', { model, enabled: enable });
+    toast((enable ? '已启用: ' : '已停用: ') + model); await loadAll(); }, false); }
+
+// ================= 模型连通测试 =================
+// ================= 查上游模型清单 =================
+let upstreamModelsCache = {};
+function openUpstreamModels(pid, btn) {
+  upstreamModelsCache = { pid, models: null, missing: [] };
+  openModal(`<h3>上游模型清单：${esc(pid)}</h3>
+    <div class="dim" style="margin-bottom:8px;font-size:12px">
+      实时拉取该供应商的 /v1/models（用其渠道 Key 鉴权），用于核对你配置的模型名是否正确。
+      <span class="tag ok">已配置</span>=本地已在用；无标记=上游有但你没配；下方"配置核对"列出上游找不到的本地配置。</div>
+    <div class="form-row"><input id="f_umSearch" placeholder="过滤模型名…" oninput="renderUpstreamModels()" style="flex:1"></div>
+    <div id="umResult" style="max-height:320px;overflow:auto"></div>
+    <div class="form-actions"><button class="btn ghost" onclick="closeModal()">关闭</button>
+      <button class="btn" id="umBtn" onclick="fetchUpstreamModels('${pid}',this)">查询</button></div>`);
+  // 打开即自动查询一次（延迟到下一 tick：确保弹窗 DOM 完全就绪后再取 #umBtn）
+  const autoBtn = document.getElementById('umBtn');
+  setTimeout(() => { if (document.getElementById('umBtn') === autoBtn) fetchUpstreamModels(pid, autoBtn); }, 100);
+}
+async function fetchUpstreamModels(pid, btn) {
+  const box = $('#umResult');
+  await withBusy(btn, '查询中…', async () => {
+    box.innerHTML = '<span class="dim">正在向上游拉取模型清单…</span>';
+    let r;
+    try {
+      r = await api(`/api/providers/${pid}/upstream-models`);
+    } catch (e) {
+      // 限流：显示明确原因 + 重试按钮（上游 IP 级限流，30~60s 后可重试）
+      if (!e.resp || !e.resp.rateLimited) {
+        box.innerHTML = `<div style="margin:8px 0;padding:10px;border:1px solid var(--err);border-radius:6px;background:rgba(224,92,92,.08)">
+          <div style="color:var(--err);font-weight:600">查询失败</div>
+          <div style="font-size:12px;margin-top:4px">${esc(e.message || e)}</div></div>`;
+        throw e;
+      }
+      box.innerHTML = `<div style="margin:8px 0;padding:10px;border:1px solid var(--warn);border-radius:6px;background:rgba(230,180,80,.08)">
+          <div style="color:var(--warn);font-weight:600;margin-bottom:4px">⏳ 上游限流 (HTTP 429)</div>
+          <div style="font-size:12px">该供应商对同一 IP 的模型清单请求有频率限制（AMD 免费档常见），等 30~60 秒后重试即可。<b>不影响模型调用</b>——聊天接口与清单接口是不同的限流桶，ZCode 里正常用没问题。</div>
+          <div style="margin-top:8px"><button class="btn mini warn" onclick="retryUpstream('${pid}',this)">30 秒后重试</button></div></div>`;
+      throw e;
+    }
+    upstreamModelsCache = { pid, models: r.models || [], missing: r.missing || [], costMs: r.costMs, count: r.count, balance: r.balance || null };
+    renderUpstreamModels();
+  }, false);
+}
+function retryUpstream(pid, btn) {
+  btn.disabled = true; btn.textContent = '等待中…';
+  let left = 30;
+  const t = setInterval(() => {
+    left--;
+    if (left > 0) { btn.textContent = left + ' 秒后重试…'; return; }
+    clearInterval(t); btn.textContent = '查询中…';
+    fetchUpstreamModels(pid, btn);
+  }, 1000);
+}
+/** 价格 tag：免费(绿)/有价($每1M token)/价格未知(灰，悬停说明) */
+function umPriceTag(m) {
+  if (m.pricePrompt == null && m.priceCompletion == null)
+    return '<span class="dim" style="font-size:11px" title="该上游未在 /v1/models 提供价格信息">价格未知</span>';
+  const p = parseFloat(m.pricePrompt) || 0, c = parseFloat(m.priceCompletion) || 0;
+  if (p === 0 && c === 0) return '<span class="tag ok" style="font-size:11px">免费</span>';
+  // 美元/token → $x/1M token（取大者显示，输入价低于输出价）
+  const perM = Math.max(p, c) * 1e6;
+  const txt = perM >= 1 ? '$' + perM.toFixed(1) : '$' + perM.toFixed(2);
+  return `<span class="tag warn" style="font-size:11px" title="输入 $${(p*1e6).toFixed(2)}/1M · 输出 $${(c*1e6).toFixed(2)}/1M">${txt}/1M</span>`;
+}
+/** 价格 → costTier 档位（一键配置自动带）：免费→free，≤$1/1M→low，≤$10/1M→standard，更贵→premium */
+function umCostTier(m) {
+  if (m.pricePrompt == null && m.priceCompletion == null) return null;   // 未知：继承供应商档
+  const p = parseFloat(m.pricePrompt) || 0, c = parseFloat(m.priceCompletion) || 0;
+  if (p === 0 && c === 0) return 'free';
+  const perM = Math.max(p, c) * 1e6;
+  if (perM <= 1) return 'low';
+  if (perM <= 10) return 'standard';
+  return 'premium';
+}
+function renderUpstreamModels() {
+  const c = upstreamModelsCache;
+  const box = $('#umResult');
+  if (!box || !c.models) return;
+  const kw = ($('#f_umSearch') ? $('#f_umSearch').value : '').toLowerCase();
+  const filtered = c.models.filter(m => !kw || m.model.toLowerCase().includes(kw));
+  const rows = filtered.map(m => {
+    // 按下标传参（模型名可含引号/斜杠，不拼进 onclick），但必须用全量数组原下标：
+    // 点「测试/一键配置」的 umTestModel/umConfigureModel 取的是 c.models[i]，
+    // 过滤视图下用 filtered 下标会点错模型
+    const i = c.models.indexOf(m);
+    let right;
+    if (m.configured) right = '<span class="tag ok">已配置</span>';
+    else right = `<button class="btn mini" onclick="umTestModel(${i})">测试</button>
+      <button class="btn mini ghost" onclick="umConfigureModel(${i},this)">一键配置</button>`;
+    return `<div class="row"><span style="word-break:break-all;flex:1">${esc(m.model)}
+      ${umPriceTag(m)}</span>
+      <span id="umst_${i}" style="flex-shrink:0;display:flex;gap:4px;align-items:center">${right}</span></div>`;
+  }).join('');
+  const missHtml = (c.missing || []).length
+    ? `<div style="margin:8px 0;padding:8px;border:1px solid var(--err);border-radius:6px;background:rgba(224,92,92,.08)">
+        <div style="color:var(--err);margin-bottom:4px;font-weight:600">⚠ 配置核对：以下本地配置的模型在上游清单中未找到（可能拼错/已下架/别名有误）</div>
+        ${c.missing.map(m => `<div style="word-break:break-all">${esc(m)}</div>`).join('')}</div>`
+    : `<div style="margin:8px 0"><span class="tag ok">配置核对通过</span> <span class="dim" style="font-size:12px">本地配置的模型名上游全部存在</span></div>`;
+  // 账户余额行：恒显，且区分"未支持/查询失败/成功"三种状态（成功绿、失败红、不支持灰）
+  const b = c.balance;
+  let balHtml;
+  if (!b) balHtml = '<div style="margin:8px 0" class="dim" >账户余额：—</div>';
+  else if (!b.configured) balHtml = `<div style="margin:8px 0"><span class="tag">无余额端点</span>
+    <span class="dim" style="font-size:12px">该供应商未提供账户余额查询接口（不支持，非配置错误）</span></div>`;
+  else if (b.ok) balHtml = `<div style="margin:8px 0"><span class="dim" style="font-size:12px">账户余额</span>
+    <b style="color:var(--ok);font-size:15px;margin-left:6px">${esc(String(b.amount))}${b.currency ? ' ' + esc(String(b.currency)) : ''}</b></div>`;
+  else balHtml = `<div style="margin:8px 0;padding:8px;border:1px solid var(--warn);border-radius:6px;background:rgba(230,180,80,.08)">
+    <span style="color:var(--warn);font-weight:600">账户余额查询失败</span>
+    <span style="font-size:12px;margin-left:6px">${esc(b.error || '未知原因')}</span></div>`;
+  box.innerHTML = `
+    ${balHtml}
+    <div class="dim" style="font-size:12px;margin-bottom:6px">共 ${c.count} 个上游模型，耗时 ${c.costMs}ms${kw ? `，过滤后 ${filtered.length} 个` : ''}。未配置的模型可先「测试」连通再「一键配置」加入模型清单。</div>
+    ${missHtml}
+    <div>${rows || '<div class="dim">无匹配模型</div>'}</div>`;
+}
+
+/** 弹窗内测试未配置模型：打开与"模型清单测试"一致的独立测试弹窗（可改输入、结果常驻、手动关闭）。
+ *  关闭/返回均回到上游列表（用缓存渲染，不重新拉取） */
+function umTestModel(i) {
+  const c = upstreamModelsCache;
+  const m = c.models[i];
+  openModal(`<h3>测试连通：${esc(c.pid)} / ${esc(m.model)}</h3>
+    <div class="form-row"><label>测试输入</label><input id="f_prompt" value="你好，请回复一句话确认你正常工作。" onkeydown="if(event.key==='Enter')umRunTest(${i},'testBtn')"></div>
+    <div class="form-actions"><button class="btn ghost" onclick="umBackToList()">← 返回列表</button>
+      <button class="btn" id="testBtn" onclick="umRunTest(${i},this)">发起测试</button>
+</div>
+    <div class="testbox" id="testOut" style="display:none"></div>`);
+}
+/** 从测试弹窗返回上游模型列表：缓存还在就直接渲染（不重新拉上游） */
+function umBackToList() {
+  const c = upstreamModelsCache;
+  if (!c || !c.models) { closeModal(); return; }
+  openModal(`<h3>上游模型清单：${esc(c.pid)}</h3>
+    <div class="dim" style="margin-bottom:8px;font-size:12px">
+      实时拉取该供应商的 /v1/models（用其渠道 Key 鉴权），用于核对你配置的模型名是否正确。
+      <span class="tag ok">已配置</span>=本地已在用；无标记=上游有但你没配；下方"配置核对"列出上游找不到的本地配置。</div>
+    <div class="form-row"><input id="f_umSearch" placeholder="过滤模型名…" oninput="renderUpstreamModels()" style="flex:1"></div>
+    <div id="umResult" style="max-height:320px;overflow:auto"></div>
+    <div class="form-actions"><button class="btn ghost" onclick="closeModal()">关闭</button>
+      <button class="btn" id="umBtn" onclick="fetchUpstreamModels('${c.pid}',this)">查询</button></div>`);
+  renderUpstreamModels();  // 缓存渲染，零延迟
+}
+/** 独立测试弹窗发起测试（结果常驻显示，点关闭才关；报错也完整显示） */
+async function umRunTest(i, btn) {
+  const c = upstreamModelsCache;
+  const m = c.models[i];
+  const out = $('#testOut');
+  try {
+    await withBusy(btn, '测试中…', async () => {
+      out.style.display = 'block';
+      out.innerHTML = '<span class="dim">正在直连调用（绕过路由/熔断，最长 60s）…</span>';
+      const r = await api('/api/test-model', 'POST', { providerId: c.pid, model: m.model, prompt: v('#f_prompt') });
+      m.tested = true;
+      out.innerHTML = `<div><span class="tag ok">连通成功</span>
+        <span class="dim">上游模型 ${esc(r.realModel)} · 耗时 ${r.costMs}ms · tokens ${r.tokensIn ?? '-'}+${r.tokensOut ?? '-'}</span></div>
+        <div class="out">${esc(r.content)}</div>
+        <div style="margin-top:8px"><button class="btn mini" onclick="umConfigureFromTest(${i},this)">✓ 一键配置此模型</button></div>`;
+    }, false);
+  } catch (e) {
+    // 报错也常驻完整显示（含上游原始错误），与供应商测试弹窗行为一致
+    out.style.display = 'block';
+    const detail = (e && e.resp && (e.resp.error || e.resp.message)) || e.message || String(e);
+    out.innerHTML = `<span class="tag err">测试失败</span>
+      <div class="out dim" style="white-space:pre-wrap;word-break:break-all">${esc(detail)}</div>
+      <div style="margin-top:8px"><button class="btn mini ghost" onclick="umConfigureFromTest(${i},this)">仍要一键配置</button></div>`;
+  }
+}
+/** 从测试弹窗一键配置（配置后关闭测试弹窗，回上游列表——列表需重新查询刷新 configured 状态） */
+async function umConfigureFromTest(i, btn) {
+  const c = upstreamModelsCache;
+  const m = c.models[i];
+  await withBusy(btn, '配置中…', async () => {
+    const body = { model: m.model };
+    const tier = umCostTier(m);
+    if (tier) body.costTier = tier;
+    await api(`/api/providers/${c.pid}/models`, 'POST', body);
+    m.configured = true;
+    toast(`已添加 ${m.model}（free-fast 组自动生效）`);
+    umBackToList();  // 回列表：该行实时显示"已配置"
+    loadAll();
+  }, false);
+}
+
+/** 一键配置：把上游模型名加入该供应商模型清单（继承供应商优先级/费用档），行状态实时变「已配置」 */
+async function umConfigureModel(i, btn) {
+  const c = upstreamModelsCache;
+  const m = c.models[i];
+  await withBusy(btn, '配置中…', async () => {
+    const body = { model: m.model };
+    const tier = umCostTier(m);
+    if (tier) body.costTier = tier;   // 按上游价格自动定费用档（免费→free），影响路由打分
+    await api(`/api/providers/${c.pid}/models`, 'POST', body);
+    m.configured = true;
+    $('#umst_' + i).innerHTML = '<span class="tag ok">已配置</span>';
+    toast(`已添加 ${m.model}（free-fast 组自动生效）`);
+    loadAll();  // 后台静默刷新供应商卡片（不重渲染弹窗）
+  }, false);
+}function openTestModel(pid, m) {
+  const h = hx({pid, model: m.model});   // 模型名可含引号：走句柄，不拼进 onclick 字符串
+  openModal(`<h3>测试连通：${esc(pid)} / ${esc(m.model)}</h3>
+    <div class="form-row"><label>测试输入</label><input id="f_prompt" value="你好，请回复一句话确认你正常工作。" onkeydown="if(event.key==='Enter')document.getElementById('testBtn').click()"></div>
+    <div class="form-actions"><button class="btn ghost" onclick="closeModal()">关闭</button>
+      <button class="btn" id="testBtn" data-hact="tRun" data-h="${h}">发起测试</button></div>
+    <div class="testbox" id="testOut" style="display:none"></div>`);
+}
+async function runTest(pid, model, btn) {
+  const out = $('#testOut');
+  try {
+    await withBusy(btn, '测试中…', async () => {
+      out.style.display = 'block';
+      out.innerHTML = '<span class="dim">正在直连调用（绕过路由/熔断，最长 60s）…</span>';
+      const r = await api('/api/test-model', 'POST', { providerId: pid, model, prompt: v('#f_prompt') });
+      out.innerHTML = `<div><span class="tag ok">连通成功</span>
+        <span class="dim">上游模型 ${esc(r.realModel)} · 耗时 ${r.costMs}ms · tokens ${r.tokensIn ?? '-'}+${r.tokensOut ?? '-'}</span></div>
+        <div class="out">${esc(r.content)}</div>`;
+    }, false);
+  } catch (e) {
+    out.style.display = 'block';
+    out.innerHTML = '<span class="tag err">测试失败</span><div class="out dim">请求异常或上游不可达，详见右上角提示</div>';
+  }
+}
+
+function openGroupForm(g) {
+  g = g || { name: '', members: [], autoAll: false };
+  const pids = ov.providers.map(p => `<option>${esc(p.id)}</option>`).join('');
+  _gPids = pids;   // 「+ 添加成员」按钮经委托读这里，不再把整段 HTML 拼进 onclick
+  openModal(`<h3>虚拟模型分组</h3>
+    <div class="form-row"><label>组名</label><input id="f_gname" value="${esc(g.name)}"></div>
+    <div class="form-row"><label>自动组</label><input type="checkbox" id="f_autoAll" ${g.autoAll?'checked':''}
+      onchange="document.getElementById('gMembers').style.display=this.checked?'none':'';document.getElementById('mAddBtn').style.display=this.checked?'none':''">
+      <span class="dim">勾选后动态包含所有供应商的全部手工配置模型，成员表无需维护</span></div>
+    <div id="gMembers" style="${g.autoAll?'display:none':''}">${g.members.map((m,i)=>memberRow(pids,m,i)).join('') || memberRow(pids,null,0)}</div>
+    <button class="btn mini ghost" id="mAddBtn" style="${g.autoAll?'display:none':''}" data-hact="mRowAdd">+ 添加成员</button>
+    <div class="form-actions"><button class="btn ghost" onclick="closeModal()">取消</button>
+      <button class="btn" onclick="saveGroup(this)">保存</button></div>`);
+}
+function memberRow(pids, m, i) {
+  m = m || {};
+  return `<div class="form-row" data-mrow>
+    <select data-f="providerId">${pids.replace(`<option>${esc(m.providerId)}</option>`, o => o.replace('<option>','<option selected>'))}</select>
+    <input data-f="model" value="${esc(m.model||'')}" placeholder="模型名" style="flex:1">
+    <input data-f="priority" type="number" value="${m.priority ?? 0}" style="width:64px" title="组内优先级">
+    <button class="btn mini err" onclick="this.parentNode.remove()">×</button></div>`;
+}
+function addMemberRow(pids) { $('#gMembers').insertAdjacentHTML('beforeend', memberRow(pids, null, 0)); }
+async function saveGroup(btn) {
+  await withBusy(btn, '保存中…', async () => {
+    const autoAll = $('#f_autoAll').checked;
+    const body = { name: v('#f_gname'), autoAll };
+    if (!autoAll) {
+      body.members = [...document.querySelectorAll('#gMembers [data-mrow]')].map(r => ({
+        providerId: r.querySelector('[data-f=providerId]').value,
+        model: r.querySelector('[data-f=model]').value,
+        priority: +r.querySelector('[data-f=priority]').value
+      })).filter(m => m.model);
+    }
+    await api('/api/groups', 'POST', body);
+    closeModal(); toast('分组已保存'); await loadAll();
+  }, false);
+}
+
+// ================= 删除/切换 =================
+async function delProv(id, btn) { if (!confirm(`删除供应商 ${id}？（连同其渠道、路由条目、组成员引用）`)) return;
+  await withBusy(btn, '删除中…', async () => {
+    await api('/api/providers/' + id, 'DELETE');
+    toast('供应商已删除'); await loadAll();
+  }, false); }
+async function delChannel(pid, cid, btn) { if (!confirm(`删除渠道 ${cid}？`)) return;
+  await withBusy(btn, '删除中…', async () => {
+    await api(`/api/providers/${pid}/channels/${cid}`, 'DELETE');
+    toast('渠道已删除'); await loadAll();
+  }, false); }
+async function delGroup(name, btn) { if (!confirm(`删除分组 ${name}？`)) return;
+  await withBusy(btn, '删除中…', async () => {
+    await api('/api/groups/' + encodeURIComponent(name), 'DELETE');
+    toast('分组已删除'); await loadAll();
+  }, false); }
+async function toggleProv(id, en, btn) {
+  await withBusy(btn, '切换中…', async () => {
+    await api(`/api/providers/${id}/${en?'enable':'disable'}`, 'POST');
+    toast('已' + (en?'启用':'停用') + ': ' + id); await loadAll();
+  }, false); }
+
+// ================= 用量 =================
+/** 快捷区间：offsetDays=0 今天；负数=今天往前 N 天（含今天） */
+function usageQuick(offsetDays) {
+  const t = new Date();
+  const f = new Date(t.getTime() + offsetDays * 86400000);
+  $('#usageFrom').value = f.toISOString().slice(0, 10);
+  $('#usageTo').value = t.toISOString().slice(0, 10);
+  loadUsage();
+}
+function usageClear(btn) {
+  $('#usageFrom').value = ''; $('#usageTo').value = '';
+  document.querySelectorAll('#tab-usage .msel').forEach(mselClear);
+  // 连同过滤选项一起重建（新日期区间外冒出来的新维度值也能看到）
+  loadUsageFilterOptions();
+  loadUsage();
+}
+async function loadUsage() {
+  loadUsageBalance();   // 分摊健康度摘要独立取数：它失败不影响用量表
+  loadKeyUsage();       // 按 Key 用量同理：单独取数、单独报错
+  const from = $('#usageFrom').value, to = $('#usageTo').value;
+  const p = new URLSearchParams();
+  if (from) p.set('from', from);
+  if (to) p.set('to', to);
+  for (const m of document.querySelectorAll('#tab-usage .msel')) {
+    const vs = mselSelected(m);
+    if (vs.length) p.set(m.dataset.param, vs.join(','));
+  }
+  // 后端异常走 200+{error}（AdminController.usage catch），网络失败 api() 抛出——
+  // 两类都必须红字可见，否则被误读成"暂无数据"
+  let d;
+  try { d = await api('/api/usage?' + p.toString()); } catch (e) { d = { error: e.message }; }
+  if (d.error) {
+    const tip = `<tr><td colspan="8" style="color:var(--err)">查询失败：${esc(d.error)} <button class="btn mini" onclick="loadUsage()">重试</button></td></tr>`;
+    $('#usageBody').innerHTML = tip; $('#clientUsageBody').innerHTML = tip;
+    $('#byDayBody').innerHTML = ''; $('#usageFoot').innerHTML = ''; $('#clientUsageFoot').innerHTML = '';
+    const h0 = $('#usageRangeHint'); if (h0) h0.textContent = '';
+    return;
+  }
+  const hint = $('#usageRangeHint'); if (hint) hint.textContent = `（${d.from} ~ ${d.to}）`;
+  // 按接入工具（成功次数=usage_daily 的 requests；总次数=成功+失败）
+  const ct = $('#clientUsageBody'); ct.innerHTML = '';
+  let ctr = 0, cti = 0, cto = 0, ctf = 0;
+  const failByClient = {};
+  for (const f of d.failByClient || []) { failByClient[f.client] = f; ctf += f.failures; }
+  for (const r of d.byClient || []) {
+    ctr += r.requests; cti += r.tokensIn; cto += r.tokensOut;
+    const f = failByClient[r.client];
+    const fails = f ? f.failures : 0;
+    const failHtml = f ? drillBadge(f, {client: r.client}) : '<span class="dim">0</span>';
+    ap(ct, `<tr><td>${esc(r.client)}</td><td>${r.requests + fails}</td><td>${r.requests}</td><td>${failHtml}</td>
+      <td>${fmtT(r.tokensIn)}</td><td>${fmtT(r.tokensOut)}</td><td>${fmtT(r.tokensIn + r.tokensOut)}</td></tr>`);
+  }
+  $('#clientUsageFoot').innerHTML = (d.byClient||[]).length
+    ? `<tr><td>合计 ${(d.byClient||[]).length} 个工具</td><td>${ctr + ctf}</td><td>${ctr}</td><td>${ctf || 0}</td><td>${fmtT(cti)}</td><td>${fmtT(cto)}</td><td>${fmtT(cti+cto)}</td></tr>`
+    : '';
+  if (!(d.byClient||[]).length) ct.innerHTML = '<tr><td colspan="7" class="dim">暂无按工具统计（新版网关收到请求后开始记录）</td></tr>';
+  // 只出现在失败榜、但不在用量榜的工具（全部请求都失败的）也列出
+  for (const [cl, f] of Object.entries(failByClient)) {
+    if ((d.byClient||[]).some(r => r.client === cl)) continue;
+    ap(ct, `<tr><td>${esc(cl)}</td><td>${f.failures}</td><td class="dim">0</td>
+      <td>${drillBadge(f, {client: cl})}</td>
+      <td class="dim">-</td><td class="dim">-</td><td class="dim">-</td></tr>`);
+  }
+  // 供应商×模型
+  const tb = $('#usageBody'); tb.innerHTML = '';
+  let tr = 0, ti = 0, toSum = 0, tf = 0;
+  const failByModel = {};
+  for (const f of d.failByModel || []) { failByModel[f.provider + '/' + f.model] = f; tf += f.failures; }
+  for (const r of d.rows || []) {
+    tr += r.requests; ti += r.tokensIn; toSum += r.tokensOut;
+    const f = failByModel[r.provider + '/' + r.model];
+    const fails = f ? f.failures : 0;
+    const failHtml = f ? drillBadge(f, {provider: r.provider, realModel: r.model}) : '<span class="dim">0</span>';
+    ap(tb, `<tr><td>${esc(r.provider)}</td><td>${esc(r.model)}</td>
+      <td>${r.requests + fails}</td><td>${r.requests}</td><td>${failHtml}</td><td>${fmtT(r.tokensIn)}</td><td>${fmtT(r.tokensOut)}</td><td>${fmtT(r.tokensIn + r.tokensOut)}</td></tr>`);
+  }
+  $('#usageFoot').innerHTML = `<tr><td colspan="2">合计 ${d.rows?.length || 0} 项</td>
+    <td>${tr + tf}</td><td>${tr}</td><td>${tf || 0}</td><td>${fmtT(ti)}</td><td>${fmtT(toSum)}</td><td>${fmtT(ti + toSum)}</td></tr>`;
+  // 全失败模型（无成功请求、不进用量榜）也列出，便于发现"一直失败"的模型
+  for (const [key, f] of Object.entries(failByModel)) {
+    if ((d.rows||[]).some(r => r.provider + '/' + r.model === key)) continue;
+    const [pv, mv] = key.includes('/') ? [key.slice(0, key.indexOf('/')), key.slice(key.indexOf('/') + 1)] : [key, ''];
+    ap(tb, `<tr><td>${esc(pv)}</td><td>${esc(mv)}</td><td>${f.failures}</td><td class="dim">0</td>
+      <td>${drillBadge(f, {provider: pv, realModel: mv})}</td>
+      <td class="dim">-</td><td class="dim">-</td><td class="dim">-</td></tr>`);
+  }
+  const bd = $('#byDayBody'); bd.innerHTML = '';
+  const maxTok = Math.max(1, ...(d.byDay || []).map(x => x.tokens));
+  for (const b of d.byDay || []) {
+    const pct = Math.round(b.tokens / maxTok * 100);
+    const fails = b.failures || 0, rate = b.failRate || 0;
+    const rateCell = fails
+      ? `<span class="tag ${rate >= 20 ? 'err' : 'warn'}" title="当日失败 ${fails} 次 / 总请求 ${b.requests + fails}">${rate}%</span>`
+      : '<span class="dim">0%</span>';
+    ap(bd, `<tr><td>${b.day}</td><td>${b.requests}</td><td>${fails || '<span class="dim">0</span>'}</td><td>${rateCell}</td><td>${fmtT(b.tokens)}</td>
+      <td style="min-width:140px"><div class="bar"><div class="fill" style="width:${pct}%"></div></div></td></tr>`);
+  }
+}
+
+// ================= 按 Key（渠道）用量 =================
+/** 一家多把 Key 时看清每一把分别扛了多少：数据源＝request_log.channel_id（选路真正用了哪一把）。
+ *  channel_id 为空的历史行单独成"上线前无归属"桶——绝不摊给在用的 Key，也不给按把钻取。 */
+async function loadKeyUsage() {
+  const p = new URLSearchParams();
+  if ($('#usageFrom').value) p.set('from', $('#usageFrom').value);
+  if ($('#usageTo').value) p.set('to', $('#usageTo').value);
+  // 与用量页同一套过滤（供应商/真实模型/来源工具）：后端三个都支持，不必担心条件被悄悄丢掉
+  for (const m of document.querySelectorAll('#tab-usage .msel')) {
+    const vs = mselSelected(m);
+    if (vs.length) p.set(m.dataset.param, vs.join(','));
+  }
+  const scope = $('#keyScope'), tb = $('#keyUsageBody'), foot = $('#keyUsageFoot');
+  let d;
+  try { d = await api('/api/usage-by-key?' + p.toString()); } catch (e) { d = { error: e.message }; }
+  if (d.error) {
+    scope.innerHTML = `<span style="color:var(--err)">读取失败：${esc(d.error)}（其余用量表不受影响）</span>`;
+    tb.innerHTML = `<tr><td colspan="14" style="color:var(--err)">查询失败：${esc(d.error)}
+      <button class="btn mini" onclick="loadKeyUsage()">重试</button></td></tr>`;
+    foot.innerHTML = '';
+    return;
+  }
+  const rows = d.rows || [];
+  // 口径 + 未归属原因恒显：不写清就会把"上线前的总量"读成某一把 Key 的量
+  scope.innerHTML = `${esc(d.scope || '')}`
+    + (d.unattributedHint ? `<br><span class="dim">${esc(d.unattributedHint)}</span>` : '');
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="14" class="dim">该窗口内没有任何带供应商的落库请求（Key 归属从本版本上线起记录，旧数据请看"上线前无归属"那一行）</td></tr>';
+    foot.innerHTML = '';
+    return;
+  }
+  tb.innerHTML = '';
+  const now = Date.now();
+  let sReq = 0, sOk = 0, sFail = 0, sRl = 0, sTi = 0, sTo = 0;
+  for (const r of rows) {
+    sReq += r.requests; sOk += r.ok; sFail += r.failures; sRl += r.rateLimits;
+    sTi += r.tokensIn; sTo += r.tokensOut;
+    const unattr = !r.channel;
+    const keyCell = unattr
+      ? '<span class="dim" title="这些请求落库时网关还没记录 Key 归属，无法判断用的是哪一把">上线前无归属</span>'
+      : `${esc(r.channel)}${r.keyMasked ? ` <span class="dim">${esc(r.keyMasked)}</span>` : ''}`
+        + (r.configured ? '' : ' <span class="tag warn" title="配置里已经没有这把 Key（改过 id 或删掉了渠道）：历史量仍单独成行，不摊给别的 Key">不在当前配置</span>');
+    const cfgCell = (unattr || !r.configured) ? '<span class="dim">-</span>'
+      : `w${r.weight ?? 1} ${r.enabled ? '<span class="tag ok">启用</span>' : '<span class="tag err">停用</span>'}`;
+    const failCell = !r.failures ? '<span class="dim">0</span>'
+      : unattr ? `<span title="无 Key 归属，不能按这把钻取；请在日志页用时间+供应商+模型过滤">${r.failures}</span>`
+      : drillBadge(r, { provider: r.provider, realModel: r.model, channel: r.channel });
+    const rlCell = r.rateLimits
+      ? `<span class="tag warn" title="error_class=RATE_LIMIT 的窗口内累计；参与评分的是另一套更短的“近 5 分钟密度”口径">${r.rateLimits}</span>`
+      : '<span class="dim">0</span>';
+    const cap = r.dailyTokenLimit, used = r.todayTokens || 0;
+    let budgetCell = `${fmtT(used)} / ${cap == null ? '<span class="dim" title="未设 Key 级日预算＝不限量">不限</span>' : fmtT(cap)}`;
+    if (cap != null && cap > 0 && used >= cap) {
+      budgetCell = `<span class="tag err" title="今日这把 Key 的 token 已达 Key 级日预算：评分会让路给别的 Key">${budgetCell}</span>`;
+    } else if (cap != null && cap > 0 && used >= cap * 0.8) {
+      budgetCell = `<span class="tag warn" title="今日已用掉 80% 以上的 Key 级日预算">${budgetCell}</span>`;
+    }
+    const coolCell = r.coolDownUntil
+      ? `<span class="tag warn" title="撞限流/报错后的 Key 级冷却：到期前这把不参与选路">剩 ${Math.max(1, Math.ceil((r.coolDownUntil - now) / 1000))}s</span>`
+      : '<span class="dim">-</span>';
+    ap(tb, `<tr><td>${esc(r.provider)}</td><td>${esc(r.model)}</td><td>${keyCell}</td><td>${cfgCell}</td>
+      <td>${r.requests}</td>
+      <td style="min-width:96px">${r.actualPct}%<div class="bar"><div class="fill" style="width:${Math.min(100, r.actualPct)}%"></div></div></td>
+      <td>${r.ok}</td><td>${failCell}</td><td>${rlCell}</td>
+      <td>${fmtT(r.tokensIn)}</td><td>${fmtT(r.tokensOut)}</td>
+      <td>${fmt(r.ttftMedianMs)}</td>
+      <td>${unattr ? '<span class="dim">-</span>' : budgetCell}</td>
+      <td>${unattr ? '<span class="dim">-</span>' : coolCell}</td></tr>`);
+  }
+  foot.innerHTML = `<tr><td colspan="4">合计 ${rows.length} 行（供应商×模型×Key 分组，窗口内最多列 300 行）</td>
+    <td>${sReq}</td><td></td><td>${sOk}</td><td>${sFail}</td><td>${sRl || '<span class="dim">0</span>'}</td>
+    <td>${fmtT(sTi)}</td><td>${fmtT(sTo)}</td>
+    <td class="dim" title="中位数不可相加，逐行看">-</td>
+    <td colspan="2" class="dim">今日Token/冷却是实时运行值，不参与窗口合计</td></tr>`;
+}
+
+// ================= 日志 =================
+// #16 分页/排序状态
+let _logOffset = 0, _logLimit = 100, _logSort = 'time', _logDir = 'desc', _logTotal = 0, _logRows = [];
+/** 点表头排序：同列切换升降序，换列默认降序（tokens/ttft/total/time），文本列默认升序 */
+function sortLogs(key) {
+  const textCol = ['client','model','provider','status'].includes(key);
+  if (_logSort === key) _logDir = _logDir === 'asc' ? 'desc' : 'asc';
+  else { _logSort = key; _logDir = textCol ? 'asc' : 'desc'; }
+  _logOffset = 0;
+  loadLogs();
+}
+function logPage(step) {
+  const next = _logOffset + step * _logLimit;
+  if (next < 0 || next >= _logTotal) return;
+  _logOffset = next;
+  loadLogs();
+}
+/** 新查询（改过滤/翻页外的一切）：回到第 1 页再加载 */
+function logQuery() { _logOffset = 0; loadLogs(); }
+function renderLogPager() {
+  const start = _logTotal ? _logOffset + 1 : 0;
+  const end = Math.min(_logTotal, _logOffset + _logRows.length);
+  const page = Math.floor(_logOffset / _logLimit) + 1, pages = Math.max(1, Math.ceil(_logTotal / _logLimit));
+  const info = $('#logPageInfo'); if (info) info.textContent = `第 ${page}/${pages} 页 · 显示 ${start}-${end} / 共 ${_logTotal} 条`;
+  const pb = $('#logPrevBtn'), nb = $('#logNextBtn');
+  if (pb) pb.disabled = _logOffset <= 0;
+  if (nb) nb.disabled = _logOffset + _logLimit >= _logTotal;
+  for (const k of ['time','client','model','provider','ttft','total','tokens','status','attempts']) {
+    const s = $('#sc_' + k); if (!s) continue;
+    s.textContent = _logSort === k ? (_logDir === 'asc' ? ' ▲' : ' ▼') : '';
+  }
+}
+/** 状态多选 chip 切换（点选高亮，立即重新查询） */
+function toggleChip(el) { el.classList.toggle('on'); _logOffset = 0; loadLogs(); }
+/** 当前选中的状态列表 */
+function selectedStatuses() { return [...document.querySelectorAll('#statusChips .chip.on')].map(c => c.dataset.v); }
+/** 收集当前过滤参数（loadLogs 与导出 CSV 共用同一份，保证导出=当前过滤全量） */
+function logFilterParams() {
+  const p = new URLSearchParams();
+  if ($('#logFrom').value) p.set('from', $('#logFrom').value);
+  if ($('#logTo').value) p.set('to', $('#logTo').value);
+  for (const m of document.querySelectorAll('#tab-logs .msel')) {
+    const vs = mselSelected(m);
+    if (vs.length) p.set(m.dataset.param, vs.join(','));
+  }
+  const sts = selectedStatuses();
+  if (sts.length === 1) p.set('status', sts[0]);
+  else if (sts.length > 1) p.set('statusIn', sts.join(','));
+  return p;
+}
+async function loadLogs() {
+  const _p0 = performance.now(), _ctx0 = perfCtx(), _pt = {};
+  const p = logFilterParams();
+  p.set('limit', _logLimit);
+  p.set('offset', _logOffset);
+  p.set('sort', _logSort);
+  p.set('dir', _logDir);
+  let d;
+  try { d = await api('/api/logs?' + p.toString(), undefined, undefined, _pt); } catch (e) { d = { error: e.message }; }
+  const _p1 = performance.now();
+  const tb = $('#logBody'); tb.innerHTML = '';
+  if (!Array.isArray(d.rows)) {
+    tb.innerHTML = `<tr><td colspan="13" style="color:var(--err)">查询失败：${esc(d.error || '响应异常')} <button class="btn mini" onclick="loadLogs()">重试</button></td></tr>`;
+    $('#logFoot').innerHTML = '';
+    _logRows = []; _logTotal = 0; renderLogPager();
+    return;
+  }
+  _logRows = d.rows;
+  _logTotal = (d.summary && d.summary.total != null) ? d.summary.total : 0;
+  // 先攒字符串，最后一支插入：500 次 insertAdjacentHTML 会触发 500 次独立解析与增量布局，
+  // 合一次解析一支插入，实测首屏长任务从 217ms 降下来。
+  const buf = [];
+  for (const r of d.rows) {
+    const ST_CN = { OK:'成功', FAILED:'失败', STREAM_TIMEOUT:'超时掐断', STREAM_ABORTED:'中断', REJECTED:'网关拒绝', CLIENT_ABORTED:'客户端断连' };
+    const cls = (r.status === 'OK' ? 'ok' : r.status === 'FAILED' ? 'err' : 'warn');
+    const ec = r.errorClass ? ` <span class="tag" style="font-size:11px" title="语义分类">${esc(r.errorClass)}</span>` : '';
+    const hs = r.httpStatus ? ` <span class="dim" title="上游 HTTP 状态码">${r.httpStatus}</span>` : '';
+    const link = r.traceId
+      ? `<button class="btn mini ghost" data-hact="traceX" data-h="${hx({trace: r.traceId})}">链路</button>`
+      : '<span class="dim">—</span>';
+    // #15 证据列：compress（早停是否压缩引起的唯一落库证据）+ profile（工具自报画像，多为主请求 critical 优先级）
+    const hasComp = r.compress && r.compress !== 'skipped';
+    const compTag = hasComp
+      ? `<span class="tag" style="font-size:11px" title="上下文压缩路径：${esc(r.compress)}">${esc(compressCn(r.compress))}</span>` : '';
+    const profTag = r.profile ? `<span class="dim" style="font-size:11px" title="工具自报画像 X-Gateway-Profile">${esc(r.profile)}</span>` : '';
+    const ev = (compTag || profTag) ? `${compTag}${compTag && profTag ? ' ' : ''}${profTag}` : '<span class="dim">—</span>';
+    buf.push(`<tr><td>${r.time}</td><td>${esc(r.client || '-')}</td><td>${esc(r.model)}</td>
+      <td class="dim">${esc(r.provider ?? '')} ${esc(r.realModel ?? '')}</td>
+      <td class="dim" title="${r.channelId ? '渠道 id：' + esc(r.channelId) : 'Key 归属功能上线前的历史请求，无法判断用的哪把 Key'}">${esc(r.channelId || '—')}</td>
+      <td>${fmt(r.ttftMs)}</td><td>${fmt(r.totalMs)}</td><td class="dim">${r.tokensIn||0}+${r.tokensOut||0}</td>
+      <td><span class="tag ${cls}">${esc(ST_CN[r.status] || r.status)}</span>${ec}${hs}</td><td>${r.attempts || 1}</td>
+      <td class="dim" style="max-width:220px;overflow:hidden;text-overflow:ellipsis" title="${esc(r.error ?? '')}">${esc(r.errorCn || r.error || '')}</td>
+      <td>${link}</td><td>${ev}</td></tr>`);
+  }
+  ap(tb, buf.join(''));
+  // 合计行：当前过滤条件下的全量统计
+  const s = d.summary || {};
+  $('#logFoot').innerHTML = (s.total != null)
+    ? `<tr><td colspan="6">合计 ${s.total} 条（本页显示 ${d.rows.length} 条）</td>
+       <td class="dim">${fmtT(s.tokensIn || 0)}+${fmtT(s.tokensOut || 0)}</td>
+       <td><span class="tag ok">成功 ${s.ok}</span> <span class="tag err" style="margin-left:4px">失败 ${s.failed}</span></td>
+       <td colspan="4" class="dim">成功率 ${s.total ? Math.round(s.ok / s.total * 100) : 0}%</td></tr>`
+    : '';
+  renderLogPager();
+  const _lrec = { t: hms(), net: Math.round(_p1 - _p0), dom: Math.round(performance.now() - _p1),
+    rows: d.rows.length, n: perfNet('/api/logs?' + p.toString(), _p0, _p1, _pt),
+    tm: { t0: Math.round((_pt.t0 || _p0) - _p0), tHead: _pt.tHead == null ? null : Math.round(_pt.tHead - _p0),
+      tBody: _pt.tBody == null ? null : Math.round(_pt.tBody - _p0), tEnd: Math.round(_p1 - _p0) },
+    ctx0: _ctx0 };
+  perfPush(PERF.load, _lrec);
+  if (_lrec.net > 120) perfServerMs('/api/logs', _lrec);
+  if (_lrec.net > 300) { PERF.env = perfEnv(); if (!PERF.abAt || Date.now() - PERF.abAt > 300000) perfAB(); }
+  renderPerf();
+}
+/** #31 链路展开：点行内"链路"按钮，在该行下方插入/收起一条 request_log 时间线（多 attempt / 压缩子请求）。 */
+async function toggleTrace(traceId, btn) {
+  const tr = btn.closest('tr');
+  if (!tr) return;
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains('trace-row')) { next.remove(); btn.textContent = '链路'; return; }
+  btn.textContent = '…';
+  const _c0 = performance.now(), _w0 = Date.now(), _ctx0 = perfCtx(), _tm = {};
+  let d;
+  try { d = await api('/api/trace/' + encodeURIComponent(traceId), undefined, undefined, _tm); }
+  catch (e) { btn.textContent = '链路'; toast('链路查询失败: ' + e.message, 'err'); return; }
+  const _c1 = performance.now();
+  btn.textContent = '收起';
+  const detail = document.createElement('tr');
+  detail.className = 'trace-row';
+  detail.innerHTML = '<td colspan="13" style="background:var(--bg)">' + renderTrace(d) + '</td>';
+  tr.after(detail);
+  const _c2 = performance.now();
+  const rec = { t: hms(_w0), tid: traceId, net: Math.round(_c1 - _c0), dom: Math.round(_c2 - _c1), paint: null,
+    w0: Math.round(_c0), w1: Math.round(_c1),   // 等待窗口（performance.now 轴）：与长任务对表用
+    steps: (d && d.count) || 0, n: perfNet('/api/trace/' + encodeURIComponent(traceId), _c0, _c1, _tm),
+    // 点击前后的浏览器现场：wake 小 = 刚唤醒；hb 大 = 主线程刚被占住；两者都能把秒表和真相对上
+    ctx0: _ctx0, ctx1: perfCtx() };
+  perfPush(PERF.trace, rec);
+  rec.tm = { t0: Math.round((_tm.t0 || _c0) - _c0), tHead: _tm.tHead == null ? null : Math.round(_tm.tHead - _c0),
+    tBody: _tm.tBody == null ? null : Math.round(_tm.tBody - _c0), tEnd: Math.round(_c1 - _c0) };
+  if (rec.net > 120) perfServerMs('/api/trace/', rec);   // 只有慢的那次才对账服务端
+  // 尖峰时留证据：全局 fetch 是否被扩展改写 + 本页 fetch 与干净 iframe fetch 的同期对照
+  // 尖峰时留证据：自动对照 5 分钟最多一次（尖峰期机器已被拖累，别用 7 条对照请求加码；按钮随时可手动按）
+  if (rec.net > 300) { PERF.env = perfEnv(); if (!PERF.abAt || Date.now() - PERF.abAt > 300000) perfAB(); }
+  renderPerf();
+  requestAnimationFrame(() => requestAnimationFrame(() => { rec.paint = Math.round(performance.now() - _c0); renderPerf(); }));
+}
+function renderTrace(d) {
+  if (!d || !Array.isArray(d.rows) || !d.rows.length)
+    return '<span class="dim">无链路（该记录早于 trace 功能，或本次请求未产生可串联的行）</span>';
+  const ST_CN = { OK:'成功', FAILED:'失败', STREAM_TIMEOUT:'超时掐断', STREAM_ABORTED:'中断', REJECTED:'网关拒绝', CLIENT_ABORTED:'客户端断连', STREAM_INCOMPLETE:'流不完整' };
+  const tagCls = s => s === 'OK' ? 'ok' : s === 'FAILED' ? 'err' : 'warn';
+  const rows = d.rows.map(r => {
+    const comp = (r.client === 'gw-compress') ? ' <span class="tag" style="font-size:11px" title="上下文压缩子请求">压缩</span>' : '';
+    const fin = r.isFinal ? ' <span class="tag ok" style="font-size:11px" title="客户端最终收到的这一行">→ 最终返回</span>' : '';
+    const ec = r.errorClass ? `<span class="dim">${esc(r.errorClass)}</span>` : '';
+    const hs = r.httpStatus ? esc(r.httpStatus) : '-';
+    const err = r.error ? `<span class="dim" title="${esc(r.error)}">${esc((r.errorCn || r.error).slice(0, 60))}</span>` : '';
+    const tok = (r.tokensIn || r.tokensOut) ? `${r.tokensIn||0}+${r.tokensOut||0}` : '-';
+    return `<tr${r.isFinal?' style="font-weight:600"':''}>
+      <td class="dim">#${r.seq} +${r.deltaMs}ms</td>
+      <td>${esc(r.time)}</td>
+      <td class="dim">${esc(r.client || '-')}</td>
+      <td class="dim">${esc(r.channel || r.provider || '-')}</td>
+      <td class="dim" title="${r.keyId ? '渠道 id：' + esc(r.keyId) : '该步无 Key 归属（网关侧拒绝，或早于 Key 归属功能）'}">${esc(r.keyId || '—')}</td>
+      <td><span class="tag ${tagCls(r.status)}">${esc(ST_CN[r.status] || r.status)}</span>${comp}${fin}</td>
+      <td class="dim">${hs}</td>
+      <td class="dim">${ec}</td>
+      <td class="dim">${tok}</td>
+      <td class="dim">${fmt(r.ttftMs)}/${fmt(r.totalMs)}</td>
+      <td>${err}</td></tr>`;
+  }).join('');
+  return `<div class="dim" style="margin:2px 0 4px;font-size:12px">链路 ${esc(d.traceId)} · 共 ${d.count} 步（同一客户端请求的多次尝试/压缩）</div>
+    <table style="width:100%"><thead><tr class="dim" style="font-size:12px">
+      <th>序/相对</th><th>时间</th><th>来源</th><th>供应商/模型</th><th title="这一步用的哪把 Key">Key</th><th>状态</th><th>HTTP</th><th>分类</th><th>tokens</th><th>TTFT/总</th><th>错误</th>
+    </tr></thead><tbody>${rows}</tbody></table>${rankSection(d)}`;
+}
+/** 链路里的"本次候选排序"：回答第一发为什么打给这家这个模型、其它家当时排第几 */
+function rankSection(d) {
+  if (d.rank) return `<div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border)">
+    <div class="dim" style="font-size:12px;margin-bottom:6px">本次请求的候选排序（网关当时真实算出来的快照）</div>
+    ${rankPanelHtml(d.rank, 'lnk' + (++_rkSeq))}</div>`;
+  if (d.legacy) return '';
+  return '<div class="dim" style="font-size:12px;margin-top:8px">这次决策没被采样到，库里没有它的排序快照（留痕默认按 5% 抽样落库）。'
+    + '想看同口径的排序：供应商页「评分与分摊」→ 评分沙盘，用同一个模型名现算一份。</div>';
+}
+
+async function loadLogs0(btn) {
+  $('#logFrom').value = ''; $('#logTo').value = '';
+  document.querySelectorAll('#tab-logs .msel').forEach(mselClear);
+  document.querySelectorAll('#statusChips .chip.on').forEach(c => c.classList.remove('on'));
+  _logOffset = 0; _logSort = 'time'; _logDir = 'desc';
+  await withBusy(btn, '加载中…', () => loadLogs(), false);
+}
+/** #16 用量页失败徽标 → 一键钻取到日志页：预置供应商/真实模型/来源工具 + 失败状态 + 同区间日期 */
+async function drillToLogs(opt) {
+  ['providers','usage','logs','sys'].forEach(n => $('#tab-'+n).style.display = n === 'logs' ? '' : 'none');
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'logs'));
+  if (!document.querySelector('#msel_provider .msel-btn')) await loadLogFilterOptions();
+  document.querySelectorAll('#tab-logs .msel').forEach(mselClear);
+  document.querySelectorAll('#statusChips .chip.on').forEach(c => c.classList.remove('on'));
+  $('#logFrom').value = (opt.dayFrom) || ($('#usageFrom') ? $('#usageFrom').value : '');
+  $('#logTo').value = (opt.dayTo) || ($('#usageTo') ? $('#usageTo').value : '');
+  if (opt.provider) mselPreselect('msel_provider', opt.provider);
+  if (opt.realModel) mselPreselect('msel_realModel', opt.realModel);
+  if (opt.client) mselPreselect('msel_client', opt.client);
+  if (opt.channel) mselPreselect('msel_key', opt.channel);
+  (opt.statuses || ['FAILED','STREAM_TIMEOUT','STREAM_ABORTED']).forEach(s => {
+    const c = document.querySelector('#statusChips .chip[data-v="' + s + '"]'); if (c) c.classList.add('on');
+  });
+  _logOffset = 0; _logSort = 'time'; _logDir = 'desc';
+  await loadLogs();
+}
+/** 多选下拉里预置一个值（选项不存在时补建一条并勾选），供钻取用 */
+function mselPreselect(id, value) {
+  const m = document.getElementById(id); if (!m) return;
+  const opts = m.querySelector('.opts'); if (!opts) return;
+  let o = [...m.querySelectorAll('.opt')].find(e => e.dataset.v === value);
+  if (!o) {
+    o = document.createElement('div'); o.className = 'opt'; o.dataset.v = value;
+    o.innerHTML = `<span class="box"></span>${esc(value)}`;
+    o.onclick = e => { e.stopPropagation(); mselToggleOpt(m, o); };
+    opts.appendChild(o);
+  }
+  o.classList.add('on'); mselRenderBtn(m);
+}
+/** 失败徽标 HTML：可点击钻取，tooltip 列明细，data-h 走句柄委托（值含特殊字符也安全） */
+function drillBadge(f, extra) {
+  const statuses = [];
+  if ((f.errors || 0) > 0) statuses.push('FAILED');
+  if ((f.timeouts || 0) > 0) statuses.push('STREAM_TIMEOUT');
+  if ((f.aborted || 0) > 0) statuses.push('STREAM_ABORTED');
+  const payload = Object.assign({}, extra, { statuses });
+  const abortTip = ('aborted' in f) ? ` · 中断 ${f.aborted || 0}` : '';
+  return `<span class="tag err" style="cursor:pointer" data-hact="drillLogs" data-h="${hx(payload)}"
+    title="点击在日志页查看这 ${f.failures} 条失败（已预置过滤）· 超时掐断 ${f.timeouts || 0} · 报错 ${f.errors || 0}${abortTip}">${f.failures}</span>`;
+}
+/** 导出当前过滤条件下的全部日志为 CSV（不受分页限制，上限走后端 Math.min(500) 的分页拉取） */
+async function exportLogsCsv(btn) {
+  const p = logFilterParams();
+  p.set('sort', _logSort); p.set('dir', _logDir);
+  const COLS = ['time','client','model','provider','realModel','channelId','ttftMs','totalMs','tokensIn','tokensOut','status','attempts','httpStatus','errorClass','compress','error','traceId'];
+  const HEAD = ['时间','来源工具','请求模型','供应商','真实模型','Key(渠道)','TTFT(ms)','总耗时(ms)','输入tokens','输出tokens','状态','尝试','HTTP','错误分类','压缩','错误','traceId'];
+  let all = [], offset = 0;
+  await withBusy(btn, '导出中…', async () => {
+    for (;;) {
+      const q = new URLSearchParams(p); q.set('limit', 500); q.set('offset', offset);
+      const d = await api('/api/logs?' + q.toString());
+      const rows = (d && d.rows) || [];
+      all = all.concat(rows);
+      offset += 500;
+      if (rows.length < 500 || offset >= 10000) break;   // 尾批保护：最多导 1 万条
+    }
+  }, false);
+  const cell = v => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const lines = [HEAD.join(',')].concat(all.map(r => COLS.map(c => cell(r[c])).join(',')));
+  const blob = new Blob(['' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `gw-logs-${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  toast(`已导出 ${all.length} 条`);
+}
+
+// ---- 多选下拉筛选组件（msel）：勾选即过滤、再点取消，无需手动删除文本 ----
+/** 某组件当前勾选值 */
+function mselSelected(m) { return [...m.querySelectorAll('.opt.on')].map(o => o.dataset.v); }
+/** 清空勾选（不动选项列表；未初始化的下拉直接跳过） */
+function mselClear(m) {
+  if (!m.querySelector('.msel-btn')) return;
+  m.querySelectorAll('.opt.on').forEach(o => o.classList.remove('on'));
+  mselRenderBtn(m);
+}
+/** 重建按钮显示：占位/选中值列表 + 计数徽标 */
+function mselRenderBtn(m) {
+  const vs = mselSelected(m);
+  const ph = m.dataset.ph;
+  m.querySelector('.msel-btn .lbl').textContent = vs.length ? vs.join(' | ') : ph;
+  const cnt = m.querySelector('.msel-btn .cnt');
+  cnt.textContent = vs.length;
+  cnt.className = 'cnt' + (vs.length ? '' : ' zero');
+}
+/** 勾选变化后按所属页刷新：data-refresh 指定函数名（用量页=loadUsage），默认日志页 loadLogs */
+function mselRefresh(m) {
+  const f = m.dataset.refresh;
+  if (f && typeof window[f] === 'function') window[f](); else logQuery();
+}
+/** 勾选/取消一个选项：立即查询 */
+function mselToggleOpt(m, opt) { opt.classList.toggle('on'); mselRenderBtn(m); mselRefresh(m); }
+/** 全选/全不选面板内选项 */
+function mselToggleAll(m, on) {
+  m.querySelectorAll('.opt').forEach(o => o.classList.toggle('on', on));
+  mselRenderBtn(m); mselRefresh(m);
+}
+/** 点外部关闭所有面板 */
+document.addEventListener('click', e => {
+  if (!e.target.closest('.msel')) document.querySelectorAll('.msel.open').forEach(m => m.classList.remove('open'));
+});
+/** 初始化一个 msel：拉取该维度出现过的值，构建按钮+面板 */
+async function mselInit(m) {
+  m.innerHTML = `<span class="msel-btn"><span class="lbl"></span><span class="cnt zero">0</span><span style="font-size:10px">▾</span></span>
+    <div class="msel-panel">
+      <div class="msel-head">
+        <button class="btn mini" onclick="event.stopPropagation();mselToggleAll(document.getElementById('${m.id}'),true)">全选</button>
+        <button class="btn mini ghost" onclick="event.stopPropagation();mselToggleAll(document.getElementById('${m.id}'),false)">清空</button>
+        ${m.dataset.dim === 'client' ? `<button class="btn mini ghost" style="margin-left:auto" title="维护下拉里展示哪些来源工具（隐藏的照常记日志）" onclick="event.stopPropagation();openClientMaintain()">维护…</button>` : ''}
+      </div>
+      <div class="opts"></div>
+    </div>`;
+  m.querySelector('.msel-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    const wasOpen = m.classList.contains('open');
+    document.querySelectorAll('.msel.open').forEach(x => x.classList.remove('open'));
+    m.classList.toggle('open', !wasOpen);
+  });
+  let values = [];
+  try {
+    const r = await api('/api/log-filter-options?type=' + m.dataset.dim);
+    values = r.values || [];
+  } catch (e) { /* 候选失败不阻塞查询 */ }
+  const opts = m.querySelector('.opts');
+  opts.innerHTML = values.length
+    ? values.map(v => `<div class="opt" data-v="${esc(v)}" onclick="event.stopPropagation();mselToggleOpt(document.getElementById('${m.id}'),this)"><span class="box"></span>${esc(v)}</div>`).join('')
+    : '<div class="dim" style="padding:6px">暂无数据</div>';
+  mselRenderBtn(m);
+}
+async function loadLogFilterOptions() {
+  await Promise.all([...document.querySelectorAll('#tab-logs .msel')].map(mselInit));
+}
+/** 用量页三个过滤下拉（供应商/真实模型/来源工具）：选项来自 usage_daily，与用量表同源 */
+async function loadUsageFilterOptions() {
+  await Promise.all([...document.querySelectorAll('#tab-usage .msel')].map(mselInit));
+}
+// ---- "来源工具"下拉维护：勾选=出现在筛选下拉；取消=不再展示（日志照常记录，随时可勾回） ----
+async function openClientMaintain() {
+  let d = { all: [], display: [] };
+  try { d = await api('/api/client-display'); } catch (e) { /* 空数据也开弹窗 */ }
+  const display = new Set(d.display && d.display.length ? d.display : d.all);
+  openModal(`<h3>维护"来源工具"下拉</h3>
+    <div class="dim" style="margin-bottom:8px;font-size:12px">
+      下拉里只展示勾选的来源工具（用来隐藏测试/一次性请求留下的噪音名）。
+      取消勾选不影响日志记录——按其它维度筛选仍能看到它们的请求；新工具出现后在这里勾上即可。</div>
+    <div id="clList" style="max-height:320px;overflow:auto;margin-bottom:10px">
+      ${(d.all || []).map(c => `<label style="display:block;padding:3px 2px;cursor:pointer"><input type="checkbox" value="${esc(c)}" ${display.has(c)?'checked':''}> ${esc(c)}</label>`).join('')
+        || '<div class="dim">日志暂无来源工具数据</div>'}</div>
+    <div class="form-actions"><button class="btn ghost" onclick="closeModal()">取消</button>
+      <button class="btn" onclick="saveClientMaintain(this)">保存</button></div>`);
+}
+async function saveClientMaintain(btn) {
+  const picked = [...document.querySelectorAll('#clList input:checked')].map(i => i.value);
+  await withBusy(btn, '保存中…', async () => {
+    await api('/api/client-display', 'POST', { clients: picked });
+    toast('来源工具下拉已更新'); closeModal(); loadLogFilterOptions();
+  }, false);
+}
+
+// ================= 系统 =================
+async function loadDiscoveryState() {
+  const btn = $('#discBtn');
+  try {
+    const r = await api('/api/catalog-discovery');
+    btn.textContent = r.enabled ? '已开启（点击关闭）' : '已关闭（点击开启）';
+    btn.className = 'btn ' + (r.enabled ? 'warn' : 'ghost');
+  } catch (e) {
+    // 启动那一瞬失败若只吞异常，按钮会永久停在"读取中"——失败态可见且可点重试
+    if (btn) { btn.textContent = '读取失败（点击重试）'; btn.className = 'btn ghost'; }
+  }
+}
+async function toggleDiscovery(btn) {
+  await withBusy(btn, '切换中…', async () => {
+    const r = await api('/api/catalog-discovery');
+    const next = !r.enabled;
+    if (next && !confirm('开启后网关会自动拉取上游 /v1/models（可能产生大量不可调用的模型条目），继续？')) return;
+    await api('/api/catalog-discovery', 'PUT', { enabled: next });
+    toast('自动发现已' + (next ? '开启' : '关闭'));
+  }, false);
+  loadDiscoveryState(); loadAll();
+}
+async function setStrategy(btn) {
+  const s = $('#strategy').value;
+  await withBusy(btn, '保存中…', async () => {
+    await api('/api/strategy', 'PUT', { strategy: s });
+    toast('策略已切换: ' + (STRAT_LABEL[s] || s));
+    await loadAll();
+  }, false);
+}
+// ---- 速带分摊（loadShare）：开关 + 带宽/慢阈值，保存即实时生效并落盘 ----
+async function loadLoadShare() {
+  const btn = $('#lsBtn');
+  try {
+    const r = await api('/api/load-share');
+    btn.textContent = r.enabled ? '分摊已开启（点击关闭）' : '分摊已关闭（点击开启）';
+    btn.className = 'btn ' + (r.enabled ? 'warn' : 'ghost');
+    $('#lsBand').value = r.bandSize;
+    $('#lsSlow').value = r.slowTtftMs;
+    const t = r.ttft || {};
+    const hint = $('#lsHint');
+    if (hint) {
+      if (t.suggestedSlowTtftMs) {
+        hint.innerHTML = `实测 ${t.samples} 个模型首字中位数 ${(t.medianMs / 1000).toFixed(1)}s · 推荐慢门槛 ` +
+          `<a href="#" style="color:#7cc4ff" title="填入输入框后点保存参数才生效" onclick="document.querySelector('#lsSlow').value=${t.suggestedSlowTtftMs};return false">${t.suggestedSlowTtftMs}ms（点此填入）</a>`;
+      } else {
+        hint.textContent = '实测样本不足，累计真实请求后自动给出推荐';
+      }
+    }
+  } catch (e) {
+    // 同 discBtn：启动瞬失败要给可见态，不然按钮永远停在"读取中"
+    if (btn) { btn.textContent = '读取失败（点击重试）'; btn.className = 'btn ghost'; }
+  }
+}
+async function toggleLoadShare(btn) {
+  await withBusy(btn, '切换中…', async () => {
+    const r = await api('/api/load-share');
+    const next = !r.enabled;
+    await api('/api/load-share', 'PUT', { enabled: next });
+    toast('速带分摊已' + (next ? '开启：多家分摊请求' : '关闭：集中到分数最高一家'));
+  }, false);
+  loadLoadShare();
+}
+async function saveLoadShareParams(btn) {
+  const band = parseInt($('#lsBand').value, 10);
+  const slow = parseInt($('#lsSlow').value, 10);
+  if (!(band >= 2 && band <= 10)) { toast('带宽需 2~10', true); return; }
+  if (!(slow >= 1000 && slow <= 60000)) { toast('慢阈值需 1000~60000ms', true); return; }
+  await withBusy(btn, '保存中…', async () => {
+    await api('/api/load-share', 'PUT', { bandSize: band, slowTtftMs: slow });
+    toast('速带参数已生效');
+  }, false);
+  loadLoadShare();
+}
+const v = sel => $(sel).value;
+
+// ================= 评分与分摊（路由决策可视化） =================
+// 综合分 = 下面 13 个因子连乘。因子 <1 就是"被这一项拉下来了"，所以表里显数值、被拉低的染色，
+// 完整含义收进悬停（列表面向扫读，长说明不该占行）。
+const FACTOR_CN = {
+  P_priority:    ['优先级',    '供应商配置里的 priority（小者优先）折算出的系数'],
+  H_health:      ['健康度',    '熔断/连续失败惩罚：连续失败越多越接近 0'],
+  Q_quality:     ['质量',      '输出质量综合惩罚（早停、空回、非法工具等）'],
+  S_ttft:        ['首字速度',  '实测首字延迟中位数平滑映射，越快越接近 1'],
+  T_throughput:  ['出字速度',  'EWMA 出字吞吐'],
+  C_costTier:    ['费用档',    'free/low/standard/premium 的相对花费'],
+  K_category:    ['场景匹配',  '请求类别与该模型擅长场景的匹配度'],
+  CS_codeScore:  ['代码能力',  '模型代码能力分（写码/工具类请求权重更高）'],
+  U_userWeight:  ['人工权重',  '模型配置里手动给的权重'],
+  R_rateRecover: ['限流恢复',  '刚被限流后的恢复期折扣'],
+  L_ratePressure:['限流压力',  '当前用量接近该家学到的限流上限时降权'],
+  TW_toolWeak:   ['工具弱',    '带 tools 请求打到"从不回 tool_calls"的模型时降权'],
+  ES_earlyStop:  ['早停嫌疑',  '该来源工具在此模型上近期早停，会话级临时降权'],
+};
+const DIAG_CN = { ttftEstMs:'实测中位首字', priority:'配置优先级', consecutiveFailures:'连续失败', qualityIssues:'质量问题',
+  rateLimits5m:'该家近5分钟撞墙', learnedReqPerMin:'该家学到的额度(次/分)' };
+const REASON_CN = {
+  CHANNEL_DISABLED:  ['渠道已停用', '这条渠道（Key 池）在配置里是关的，压根没参与评分'],
+  TEMP_DISABLED:     ['临时停用',   '余额/额度类错误被定时对账临时停用（次日或调通后自动恢复）'],
+  TIER_BLOCKED:      ['档位不符',   '当前策略把该费用档过滤掉了（如"只走免费"会挡掉付费档）'],
+  CONTEXT_TOO_LARGE: ['超出上下文窗口', '本次输入的 token 超过该模型标注的窗口，直接不参与路由'],
+};
+const STATE_CN = { OK:['参与评分',''], COOLING:['冷却中','warn'], BLOCKED:['预算/并发占满','warn'], FILTERED:['门控出局','err'] };
+const RK_TABS = { sandbox:['rkSandbox','rkTabSbx'], live:['rkLive','rkTabLive'], balance:['rkBalance','rkTabBal'] };
+let _rkPrefill = null, _rkLoaded = {}, _rkSeq = 0;
+
+function openRankModal(prefill, tab) {
+  _rkPrefill = prefill || null; _rkLoaded = {};
+  openModal(`
+    <h3>评分与分摊 <span class="dim" style="font-size:12px;font-weight:400">综合分是「每一次请求现算」的快照，不是一张静态排名表</span></h3>
+    <div class="toolbar" style="margin-bottom:12px">
+      <button class="btn" id="rkTabSbx" onclick="switchRankTab('sandbox')">评分沙盘（现算重放）</button>
+      <button class="btn ghost" id="rkTabLive" onclick="switchRankTab('live')">最近实测留痕</button>
+      <button class="btn ghost" id="rkTabBal" onclick="switchRankTab('balance')">分摊对照</button>
+      <button class="btn ghost" onclick="closeModal()">关闭</button>
+    </div>
+    <div id="rkSandbox"></div>
+    <div id="rkLive" style="display:none"></div>
+    <div id="rkBalance" style="display:none"></div>`, true);
+  renderRankSandbox();
+  switchRankTab(tab || 'sandbox');
+}
+function switchRankTab(name, btn) {
+  Object.entries(RK_TABS).forEach(([k, ids]) => {
+    const box = document.getElementById(ids[0]), tb = document.getElementById(ids[1]);
+    if (box) box.style.display = k === name ? '' : 'none';
+    if (tb) tb.className = 'btn' + (k === name ? '' : ' ghost');
+  });
+  if (name === 'live' && !_rkLoaded.live) { _rkLoaded.live = true; renderRankLive(); }
+  if (name === 'balance' && !_rkLoaded.balance) { _rkLoaded.balance = true; renderRankBalance(); }
+}
+function rkErr(e) {
+  return `<div style="padding:10px;border:1px solid var(--err);border-radius:6px;background:rgba(224,92,92,.08);color:var(--err);font-size:12px">
+    读取失败：${esc(e && e.message || e)}</div>`;
+}
+
+/** 页签1：评分沙盘——用当前运行态重放一次决策（只读，不抢半开槽、不写库、不改配置） */
+function renderRankSandbox() {
+  const gs = (ov && ov.groups || []).map(g => g.name);
+  const pts = [];
+  for (const p of (ov && ov.providers || [])) for (const m of (p.models || []))
+    if (m.enabled !== false && m.source !== 'discovered') pts.push(p.id + '/' + m.model);
+  const dflt = (_rkPrefill && _rkPrefill.model) || gs[0] || 'free-fast';
+  $('#rkSandbox').innerHTML = `
+    <div class="dim" style="font-size:12px;line-height:1.6;margin-bottom:10px">
+      按<b>现在</b>的运行态（健康度、实测首字、限流学习、早停惩罚）把一次请求的候选排序算给你看。
+      改下面任一条件都会改变结果——它回答的是"如果这条请求现在进来，谁排前面、谁被踢出、为什么"。</div>
+    <div class="form-row"><label>请求的模型</label><input id="rk_model" list="rk_models" value="${esc(dflt)}">
+      <datalist id="rk_models">${[...gs, ...pts].map(x => `<option value="${esc(x)}">`).join('')}</datalist>
+      <span class="dim" style="font-size:12px">组名或 provider/model 点名</span></div>
+    <div class="form-row"><label>策略</label><select id="rk_strategy">
+      <option value="">跟随当前（${esc(STRAT_LABEL[ov && ov.strategy] || (ov && ov.strategy) || '')}）</option>
+      ${Object.keys(STRAT_LABEL).map(s => `<option value="${s}">${esc(STRAT_LABEL[s])}</option>`).join('')}</select></div>
+    <div class="form-row"><label>带 tools 请求</label>
+      <label class="ck"><input type="checkbox" id="rk_tools" checked> 工具调用类请求（会触发弱工具降权与速带过滤）</label></div>
+    <div class="form-row"><label>关键请求</label>
+      <label class="ck"><input type="checkbox" id="rk_critical"> critical=true（允许走付费档、放宽费用惩罚）</label></div>
+    <div class="form-row"><label>输入 token</label><input id="rk_tokens" type="number" min="0" placeholder="留空=不判超窗与压缩">
+      <span class="dim" style="font-size:12px">填了才会按各模型上下文窗口做门控</span></div>
+    <div class="form-row"><label>来源工具</label><input id="rk_client" placeholder="留空=不限定（早停惩罚按工具×模型算，填了才吃到那一份）"></div>
+    <div class="form-actions" style="justify-content:flex-start">
+      <button class="btn" onclick="runRankPreview(this)">重放这次评分</button>
+      <span class="dim" style="font-size:12px;align-self:center">沙盘只读：不占用半开探测槽、不写留痕库、不改任何运行态</span></div>
+    <div id="rkSbxResult" style="margin-top:12px"></div>`;
+}
+async function runRankPreview(btn) {
+  const body = { model: (v('#rk_model') || '').trim(), hasTools: $('#rk_tools').checked, critical: $('#rk_critical').checked };
+  const st = v('#rk_strategy'); if (st) body.strategy = st;
+  const tk = v('#rk_tokens'); if (tk !== '') body.inputTokens = +tk;
+  const cl = (v('#rk_client') || '').trim(); if (cl) body.client = cl;
+  if (!body.model) { toast('要先填请求的模型名', true); return; }
+  await withBusy(btn, '评分中…', async () => {
+    const t = await api('/api/rank-preview', 'POST', body);
+    $('#rkSbxResult').innerHTML = t.note
+      ? `<div class="dim">${esc(t.note)}</div>`
+      : `<div class="dim" style="font-size:12px;margin-bottom:6px">沙盘重放（未真实发起请求）</div>` + rankPanelHtml(t, 'sbx');
+  }, false);
+}
+
+/** 一次决策快照的通用呈现：页签1/页签2/日志链路三处复用，口径必须一致 */
+function rankPanelHtml(t, scope) {
+  const rows = t.rows || [], flt = t.filtered || [];
+  const max = rows.reduce((m, r) => Math.max(m, r.score || 0), 0) || 1;
+  const feat = [];
+  feat.push(t.hasTools ? '带 tools' : '不带 tools');
+  if (t.critical) feat.push('critical');
+  if (t.inputTokens != null) feat.push('输入 ~' + fmtT(t.inputTokens) + ' tok');
+  if (t.client) feat.push('来源 ' + t.client);
+  if (t.category) feat.push('类别 ' + t.category);
+  const meta = [];
+  meta.push('策略 <b>' + esc(STRAT_LABEL[t.strategy] || t.strategy || '-') + '</b>');
+  meta.push(t.loadShare
+    ? `分摊 <b style="color:var(--ok)">开</b>（带宽 ${t.bandSize} 席 · 慢阈值 ${t.slowTtftMs}ms）`
+    : `分摊 <b style="color:var(--err)">关</b>（直接取分数首位，不抽签）`);
+  meta.push(`参与评分 <b>${rows.length}</b> · 门控出局 <b>${flt.length}</b>`);
+  if (t.pickedModel) meta.push(`主选 <b>${esc(t.pickedProvider)}/${esc(t.pickedModel)}</b>`);
+  else meta.push('<b style="color:var(--err)">本次无可路由候选</b>');
+  let html = `<div class="dim" style="font-size:12px;line-height:1.7;margin-bottom:4px">${meta.join(' · ')}</div>
+    <div class="dim" style="font-size:12px;margin-bottom:8px">请求特征：${esc(feat.join(' · '))}
+      ${t.pickReason ? `｜主选理由：${esc(t.pickReason)}` : ''}</div>`;
+  if (t.rowsTruncated) html += `<div class="tag warn" style="margin-bottom:6px">留痕为控制体积只存了前 ${t.rowsTruncated} 行，本次实际 ${t.rowsTruncated}+ 行</div>`;
+  if (!rows.length && !flt.length) return html + '<div class="dim">没有任何候选（组名解析不出模型，或供应商全停）</div>';
+
+  const cell = [];
+  rows.forEach((r, i) => {
+    const stt = STATE_CN[r.state] || [r.state || '', ''];
+    const w = Math.max(2, Math.round(100 * (r.score || 0) / max));
+    cell.push(`<tr${r.picked ? ' style="font-weight:600"' : ''}>
+      <td class="dim">${i + 1}</td>
+      <td>${esc(r.provider)}/${esc(r.model)}${r.channel ? ` <span class="dim">@${esc(r.channel)}</span>` : ''}
+        ${r.picked ? ' <span class="tag ok">主选</span>' : ''}${r.inBand ? ' <span class="tag" style="border-color:var(--accent);color:var(--accent)" title="进入本次分摊抽签席">席</span>' : ''}</td>
+      <td><div style="display:flex;align-items:center;gap:6px"><span class="sbar${r.picked ? ' pick' : ''}"><i style="width:${w}%"></i></span>
+        <span class="dim" style="font-size:12px">${r.score}</span></div></td>
+      <td>${stt[0] ? `<span class="tag ${stt[1] || 'ok'}">${esc(stt[0])}</span>` : ''}</td>
+      <td class="dim">${r.inBand ? (r.share != null ? (r.share * 100).toFixed(1) + '%' : '—') : '不在席'}</td>
+      <td class="dim" style="font-size:12px;white-space:normal">${esc(r.note || '')}</td>
+      <td>${r.factors ? `<button class="btn mini ghost" onclick="tgRankF('${scope}',${i},this)">因子</button>` : '<span class="dim">—</span>'}</td></tr>`);
+    cell.push(`<tr id="rkf-${scope}-${i}" style="display:none"><td></td><td colspan="6" style="background:var(--bg)">
+      <div style="line-height:1.9">${rkFactorsHtml(r.factors)}</div></td></tr>`);
+  });
+  html += `<table style="width:100%"><thead><tr class="dim" style="font-size:12px">
+    <th>#</th><th>渠道</th><th>综合分（条长=相对最高分）</th><th>状态</th><th>应得份额</th><th>说明</th><th></th>
+    </tr></thead><tbody>${cell.join('')}</tbody></table>`;
+
+  if (flt.length) {
+    const fr = flt.map(r => {
+      const rc = REASON_CN[r.reason] || [r.reason || '出局', ''];
+      return `<tr><td>${esc(r.provider)}/${esc(r.model)}</td>
+        <td><span class="tag err">${esc(rc[0])}</span></td>
+        <td class="dim" style="font-size:12px;white-space:normal">${esc(r.note || rc[1])}</td></tr>`;
+    }).join('');
+    html += `<div class="dim" style="font-size:12px;margin:10px 0 4px">被门控直接剔除（<b>没打分就是没分</b>，所以不出现在上表；这就是"为什么它从没被调用"的第一种答案）：</div>
+      <table style="width:100%"><thead><tr class="dim" style="font-size:12px"><th>渠道</th><th>出局原因</th><th>说明</th></tr></thead><tbody>${fr}</tbody></table>`;
+  }
+  return html;
+}
+function rkFactorsHtml(f) {
+  if (!f) return '<span class="dim">未记录因子</span>';
+  const chips = [];
+  Object.entries(FACTOR_CN).forEach(([k, cn]) => {
+    const val = f[k]; if (val == null) return;
+    const cls = val <= 0 ? 'zero' : val < 0.999 ? 'low' : '';
+    chips.push(`<span class="fchip ${cls}" title="${esc(cn[0])}（因子 ${k}）：${esc(cn[1])}">
+      ${esc(cn[0])} <b>${val}</b></span>`);
+  });
+  // 诊断值各自带单位；"0" 在限流这两项里含义是"没学到/没撞过"，不能光秃秃显示 0
+  const diagVal = (k, x) => k === 'ttftEstMs' ? x + 'ms'
+    : k === 'learnedReqPerMin' ? (x > 0 ? x + ' 次/分' : '未学到')
+    : k === 'rateLimits5m' ? (x > 0 ? x + ' 次' : '没撞过') : x;
+  const diag = Object.entries(DIAG_CN).map(([k, cn]) =>
+    f[k] == null ? '' : `<span class="fchip" title="诊断附值，不参与连乘">${esc(cn)} <b>${diagVal(k, f[k])}</b></span>`).join('');
+  const prod = Object.entries(FACTOR_CN).map(([k]) => f[k]).filter(x => x != null).reduce((a, b) => a * b, 1);
+  return chips.join('') + (diag ? `<div style="margin-top:4px">${diag}</div>` : '') +
+    `<div class="dim" style="font-size:11px;margin-top:4px">因子连乘 ${Math.round(prod * 1e4) / 1e4}
+      （服务端把每个因子按 4 位小数取整后再回传，所以连乘与综合分只有末位之差）</div>`;
+}
+function tgRankF(scope, i, btn) {
+  const el = document.getElementById('rkf-' + scope + '-' + i);
+  if (!el) return;
+  const show = el.style.display === 'none';
+  el.style.display = show ? '' : 'none';
+  if (btn) btn.textContent = show ? '收起因子' : '因子';
+}
+
+/** 页签2：最近实测留痕（内存环形 200 条 + 采样落库概况） */
+function renderRankLive() {
+  $('#rkLive').innerHTML = `
+    <div class="toolbar" style="margin-bottom:8px">
+      <span class="dim">来源工具过滤</span><input id="rkfClient" placeholder="留空=全部" style="width:130px">
+      <button class="btn mini ghost" onclick="loadRankTraces()">刷新</button>
+      <span class="dim" style="margin-left:12px">落库采样率 %</span><input id="rkRate" type="number" min="0" max="100" step="5" style="width:64px">
+      <span class="dim">保留天数</span><input id="rkKeep" type="number" min="1" max="90" style="width:56px">
+      <button class="btn mini ghost" onclick="saveRankTraceConfig(this)">保存</button>
+      <button class="btn mini ghost" id="rkEnBtn" onclick="toggleRankTrace()">留痕开关</button>
+      <span class="dim" id="rkLiveHint"></span>
+    </div>
+    <div class="dim" style="font-size:12px;line-height:1.6;margin-bottom:8px">
+      内存环形缓冲保留最近 <b>200</b> 条真实决策（不受采样影响，重启即清）；库里只按采样率存，
+      所以列表里每一条都能展开看当时的完整快照。</div>
+    <div id="rkTraceList"></div>
+    <div id="rkTraceDetail" style="margin-top:10px"></div>`;
+  loadRankTraces();
+}
+async function loadRankTraces() {
+  const box = $('#rkTraceList'); if (!box) return;
+  box.innerHTML = '<div class="dim">读取中…</div>';
+  let d;
+  const cl = (v('#rkfClient') || '').trim();
+  try { d = await api('/api/rank-traces?limit=50' + (cl ? '&client=' + encodeURIComponent(cl) : '')); }
+  catch (e) { box.innerHTML = rkErr(e); return; }
+  if ($('#rkRate')) $('#rkRate').value = Math.round((d.sampleRate || 0) * 100);
+  if ($('#rkKeep')) $('#rkKeep').value = d.keepDays;
+  if ($('#rkEnBtn')) $('#rkEnBtn').textContent = '留痕：' + (d.enabled ? '开' : '关');
+  const st = d.stored || {};
+  $('#rkLiveHint').textContent = `库内 ${st.stored ?? 0} 条${st.oldestTs ? `（${new Date(st.oldestTs).toLocaleString()} 起）` : ''}`;
+  const tr = d.traces || [];
+  if (!tr.length) { box.innerHTML = '<div class="dim">内存里还没有留痕：发一条真实请求（或等工具调用）后再来看。</div>'; return; }
+  const rows = tr.map(t => `<tr>
+    <td class="dim">${esc(new Date(t.ts).toLocaleTimeString())}</td>
+    <td>${esc(t.requestedModel)}</td>
+    <td class="dim">${esc(t.client || '-')} · ${esc((t.endpoint || '').replace('/v1/', ''))}</td>
+    <td class="dim">${esc(STRAT_LABEL[t.strategy] || t.strategy || '-')}${t.hasTools ? ' · 带tools' : ''}</td>
+    <td class="dim">${t.candidates} / ${t.filtered}</td>
+    <td>${t.pickedModel ? esc(t.pickedProvider) + '/' + esc(t.pickedModel) : '<span class="tag err">无候选</span>'}</td>
+    <td class="dim" style="font-size:12px;white-space:normal">${esc(t.pickReason || '')}</td>
+    <td>${t.traceId ? `<button class="btn mini ghost" data-hact="rkTrace" data-h="${hx({ tid: t.traceId })}">展开排序</button>` : ''}</td></tr>`).join('');
+  box.innerHTML = `<table style="width:100%"><thead><tr class="dim" style="font-size:12px">
+    <th>时刻</th><th>请求模型</th><th>来源/端点</th><th>策略</th><th>候选/出局</th><th>主选</th><th>主选理由</th><th></th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+}
+async function showRankTrace(tid, btn) {
+  const box = $('#rkTraceDetail'); if (!box) return;
+  if (btn) btn.disabled = true;
+  box.innerHTML = '<div class="dim">读取中…</div>';
+  let t;
+  try { t = await api('/api/rank-trace/' + encodeURIComponent(tid)); } catch (e) { box.innerHTML = rkErr(e); if (btn) btn.disabled = false; return; }
+  if (!t.found) { box.innerHTML = `<div class="dim">${esc(t.note || '未找到该次决策')}</div>`; if (btn) btn.disabled = false; return; }
+  if (btn) btn.textContent = '已展开';
+  box.innerHTML = `<div class="dim" style="font-size:12px;margin-bottom:6px">真实请求留痕 · trace <span class="dim">${esc(tid)}</span> ·
+    ${esc(new Date(t.ts).toLocaleString())}</div>` + rankPanelHtml(t, 'live');
+  box.scrollIntoView({ block: 'nearest' });
+}
+async function toggleRankTrace() {
+  let cur;
+  try { cur = await api('/api/rank-trace-config'); } catch (e) { toast('读取失败: ' + e.message, true); return; }
+  const next = !cur.enabled;
+  if (!confirm(`${next ? '开启' : '关闭'}路由留痕？\n关闭后"最近实测留痕/链路内候选排序"将没有新数据，评分沙盘不受影响（它是现算的）。`)) return;
+  await withBusy($('#rkEnBtn'), '保存中…', () => api('/api/rank-trace-config', 'PUT', { enabled: next }), '已' + (next ? '开启' : '关闭'));
+  loadRankTraces();
+}
+async function saveRankTraceConfig(btn) {
+  const rate = parseFloat(v('#rkRate')), keep = parseInt(v('#rkKeep'), 10);
+  if (isNaN(rate) || rate < 0 || rate > 100) { toast('采样率需 0~100（%）', true); return; }
+  await withBusy(btn, '保存中…', () => api('/api/rank-trace-config', 'PUT', { sampleRate: rate / 100, keepDays: keep }), '留痕参数已生效');
+  loadRankTraces();
+}
+
+/** 未进抽签席的原因码 → 中文（服务端按码分类计数，界面不猜 note 文案） */
+const BAND_CN = {
+  BAND_DUP_KEY:    ['重复 Key 合占席', '同一个模型的多把 Key 只占一个抽签席，这一行是重复 Key，跟首 Key 一起分摊——不是出局'],
+  BAND_SLOW:       ['实测首字慢', '最近实测首字中位超过 shareSlowTtftMs，不占席（仍留在兜底顺序，别家挂了照样接）'],
+  BAND_VERY_SLOW:  ['反复极慢', '窗口内有多条极慢样本（≥30s 不出首字）被踢出抽签席'],
+  BAND_RATE_LIMIT: ['持续撞限流', '该家近 5 分钟反复撞 429、且学到的额度本来就紧 → 不占抽签席（额度宽的家偶发几次不算，仍给席）'],
+  BAND_NO_SEAT:    ['分数排在席外', '分数排在席位数上限（shareBandSize）之外，或该模型已有别的 Key 占了席'],
+};
+
+/** 页签3：分摊对照——实际分到量 vs 评分应得份额，并把零调用的逐个点名 */
+function renderRankBalance() {
+  $('#rkBalance').innerHTML = `
+    <div class="toolbar" style="margin-bottom:8px">
+      <span class="dim">窗口</span>
+      <select id="rkDays" onchange="loadLoadBalance(+this.value)">
+        ${[1, 3, 7, 14, 30].map(dd => `<option value="${dd}"${dd === 3 ? ' selected' : ''}>近 ${dd} 天</option>`).join('')}
+      </select>
+      <span class="dim">来源工具</span>
+      <select id="rkClient" onchange="loadLoadBalance()"><option value="">全部来源</option></select>
+      <button class="btn mini ghost" onclick="loadLoadBalance(+v('#rkDays'))">刷新</button>
+      <span class="dim" id="rkBalHint"></span>
+    </div>
+    <div id="rkBalSummary" class="dim" style="font-size:12px;line-height:1.7;margin-bottom:10px">读取中…</div>
+    <div id="rkBalBand"></div>
+    <div id="rkBalBody"></div>
+    <div id="rkBalNever" style="margin-top:12px"></div>
+    <div class="dim" style="font-size:12px;line-height:1.6;margin-top:10px">
+      「应得份额」= 抽签席里该渠道出现过的权重（√分数）均值，只有开分摊且进过席才有值。
+      它与实际占比的差，衡量的是<b>抽签运气 + 冷却/预算让路</b>，不是配置错了；
+      真正的答案在下方的零调用清单：那才是"配了却没分到量"。</div>`;
+  loadLoadBalance(3);
+}
+async function loadLoadBalance(days, client) {
+  const box = $('#rkBalBody'); if (!box) return;
+  if (days === undefined) days = +v('#rkDays') || 3;
+  if (client === undefined) client = v('#rkClient') || '';
+  box.innerHTML = '<div class="dim">读取中…</div>';
+  let d;
+  try { d = await api('/api/load-balance?days=' + days + (client ? '&client=' + encodeURIComponent(client) : '')); }
+  catch (e) { box.innerHTML = rkErr(e); return; }
+  // 来源下拉的选项集合随窗口变化（新出现的工具要能选到），选中的值保持不变
+  const sel = $('#rkClient');
+  if (sel) {
+    const cs = (d.usageClients || []).filter(Boolean);
+    const buf = ['<option value="">全部来源</option>'];
+    cs.forEach(c => buf.push(`<option value="${esc(c)}"${c === client ? ' selected' : ''}>${esc(c)}</option>`));
+    sel.innerHTML = buf.join('');
+  }
+  const rows = (d.rows || []).slice().sort((a, b) => b.requests - a.requests);
+  const never = d.neverCalled || [];
+  $('#rkBalHint').textContent = `${d.from} ~ ${d.to}`;
+  const nZero = never.filter(n => n.code === 'ZERO_CALL').length;
+  const nOff = never.length - nZero;
+  const top1 = rows.length ? rows[0].actualPct : 0;
+  const pct1 = x => Math.round(x * 10) / 10;    // 占比是后端算好的浮点，累加后必须再收一位，否则界面出现 92.69999%
+  const top3 = pct1(rows.slice(0, 3).reduce((s, r) => s + (r.actualPct || 0), 0));
+  const spread = nZero > rows.length;           // 已启用却零调用比分到量的还多=没摊开
+  const verdict = !rows.length
+    ? '<b style="color:var(--warn)">窗口内没有任何调用</b>'
+    : top1 >= 70 ? `<b style="color:var(--err)">流量集中在单一模型（最高占 ${top1}%）</b>`
+    : (top3 >= 90 || spread)
+      ? `<b style="color:var(--warn)">前 3 个模型吃掉 ${top3}%，另有 ${nZero} 个已启用的模型零调用——分摊没铺开</b>`
+      : `<b style="color:var(--ok)">分摊在起作用：前 3 占 ${top3}%，覆盖 ${rows.length} 个渠道</b>`;
+  $('#rkBalSummary').innerHTML =
+    `总请求 <b>${d.totalRequests}</b> · 实际调用到 <b>${rows.length}</b> 个「供应商×模型」 ·
+     已启用但零调用 <b style="color:${nZero ? 'var(--err)' : 'var(--ok)'}">${nZero}</b> 个${nOff ? `（另有 ${nOff} 条是停用/无渠道，不参与评分）` : ''} · ${verdict}
+     <br><span class="dim">取数口径：${esc(d.usageScope || '实际侧＝全部来源')} ｜
+     ${esc(d.shareScope || '应得侧＝抽签席权重均值')}，本窗口观测到 <b>${d.shareSamples || 0}</b> 次决策
+     （采样库 ${d.shareSamplesFromDb || 0} + 内存 ${d.shareSamplesFromMem || 0}）</span>
+     ${d.shareSamples ? '' : '<br><span style="color:var(--warn)">应得份额暂无观测样本：窗口内没有落库的带抽签席决策。发几条请求后再看，或确认留痕开关（默认 5% 采样，调高到 100% 立刻有样本）</span>'}`;
+  // 未进席原因分类恒显：光说"没摊开"不够，要说清每家是被什么门槛挡住的
+  const band = d.bandOutReasons || {};
+  const bandKeys = Object.keys(band).sort((a, b) => band[b] - band[a]);
+  $('#rkBalBand').innerHTML = `<div class="dim" style="font-size:12px;margin:2px 0 6px">
+      未进抽签席的原因（本窗口 ${d.shareSamples || 0} 次观测决策里累计）：
+      ${bandKeys.length
+        ? bandKeys.map(k => `<span class="fchip" title="${esc((BAND_CN[k] || ['', k])[1] || '')}">
+            ${esc((BAND_CN[k] || [k])[0])} <b>${band[k]}</b> 行</span>`).join(' ')
+        : '<span class="dim">窗口内没有"未进席"记录（样本不足，或候选都进了席）</span>'}
+    </div>`;
+  const tb = rows.map((r, i) => {
+    const diff = r.expectedShare == null ? null : +(r.actualPct - r.expectedShare).toFixed(1);
+    const dc = diff == null ? 'dim' : diff <= -10 ? 'style="color:var(--err)"' : diff >= 10 ? 'style="color:var(--warn)"' : '';
+    return `<tr><td class="dim">${i + 1}</td><td>${esc(r.provider)}/${esc(r.model)}</td>
+      <td>${r.requests}</td><td>${r.actualPct}%</td>
+      <td ${dc}>${r.expectedShare == null ? '暂无观测' : r.expectedShare + '%'}</td>
+      <td ${dc}>${diff == null ? '—' : (diff > 0 ? '+' : '') + diff + 'pt'}</td>
+      <td class="dim">${fmtT(r.tokens || 0)} tok</td></tr>`;
+  }).join('');
+  box.innerHTML = rows.length
+    ? `<table style="width:100%"><thead><tr class="dim" style="font-size:12px"><th>#</th><th>供应商/模型</th><th>实际次数</th><th>实际占比</th><th>应得份额</th><th>偏差</th><th>Token</th></tr></thead><tbody>${tb}</tbody></table>`
+    : '<div class="dim">该窗口内没有调用记录</div>';
+  const NEVER_ORDER = { ZERO_CALL: 0, NO_CHANNEL: 1, MODEL_DISABLED: 2 };
+  const NEVER_CN = { ZERO_CALL: '已启用零调用', NO_CHANNEL: '无启用渠道', MODEL_DISABLED: '路由里被停用' };
+  const neverSorted = never.slice().sort((a, b) => (NEVER_ORDER[a.code] ?? 9) - (NEVER_ORDER[b.code] ?? 9));
+  $('#rkBalNever').innerHTML = never.length
+    ? `<div class="dim" style="font-size:12px;margin-bottom:4px">
+        配置里启用着、却<b>一次都没被调用</b>的共 ${never.length} 条：其中
+        <b style="color:var(--err)">${nZero}</b> 条是"进了候选池但排不进抽签席/从未被抽中"（点"为什么"沙盘重放看它排第几、被哪个因子拉下），
+        其余 ${never.length - nZero} 条是配置层面就被停用，压根不参与评分。</div>
+      <table style="width:100%"><thead><tr class="dim" style="font-size:12px"><th>供应商</th><th>模型</th><th>状态</th><th>说明</th><th></th></tr></thead><tbody>
+      ${neverSorted.map(n => `<tr><td>${esc(n.provider)}</td><td>${esc(n.model)}</td>
+        <td><span class="tag err">${esc(NEVER_CN[n.code] || n.code || '零调用')}</span></td>
+        <td class="dim" style="font-size:12px;white-space:normal">${esc(n.why || '')}</td>
+        <td>${n.code === 'ZERO_CALL' ? `<button class="btn mini ghost" data-hact="rkWhy" data-h="${hx({ provider: n.provider, model: n.model })}">为什么</button>` : '<span class="dim" title="停用类原因已经定论，沙盘里不会出现该候选">—</span>'}</td></tr>`).join('')}
+      </tbody></table>`
+    : '<div class="tag ok">没有零调用的已启用模型：配置里的都分到过量</div>';
+}
+
+/** 用量页顶部摘要卡：不点开弹窗也能一眼看到"有没有分摊下去" */
+async function loadUsageBalance(btn) {
+  const el = $('#lbSummary'); if (!el) return;
+  el.innerHTML = '读取中…';
+  let d;
+  try { d = await api('/api/load-balance?days=3'); }
+  catch (e) { el.innerHTML = `<span style="color:var(--err)">读取失败：${esc(e && e.message || e)}</span>`; return; }
+  if ($('#lbSumDays')) $('#lbSumDays').textContent = d.days;
+  const rows = (d.rows || []).slice().sort((a, b) => b.requests - a.requests);
+  const never = d.neverCalled || [];
+  const nZero = never.filter(n => n.code === 'ZERO_CALL').length;
+  const nOff = never.length - nZero;
+  const top3 = rows.slice(0, 3).map(r => `${r.provider}/${r.model} ${r.actualPct}%`).join(' · ');
+  const p3 = Math.round(rows.slice(0, 3).reduce((s, r) => s + (r.actualPct || 0), 0) * 10) / 10;
+  const verdict = !rows.length
+    ? '<b style="color:var(--warn)">近 3 天没有任何调用</b>'
+    : (rows[0].actualPct >= 70 || p3 >= 90 || nZero > rows.length)
+      ? `<b style="color:var(--err)">分摊没铺开</b>：${rows.length} 个分到量的渠道里前 3 个吃掉 ${p3}%，
+         另有 <b style="color:var(--err)">${nZero}</b> 个已启用的模型一次没被调用（逐个原因见「打开分摊对照」）`
+      : `<b style="color:var(--ok)">分摊在起作用</b>：${rows.length} 个渠道都有量（前 3 占 ${p3}%），已启用零调用 ${nZero} 个`;
+  const band = d.bandOutReasons || {};
+  const bandKeys = Object.keys(band).sort((a, b) => band[b] - band[a]);
+  const bandTxt = bandKeys.length
+    ? bandKeys.slice(0, 3).map(k => `${(BAND_CN[k] || [k])[0]} ${band[k]} 行`).join(' · ') : '';
+  el.innerHTML = `总请求 <b>${d.totalRequests}</b> · 调用到 <b>${rows.length}</b> 个「供应商×模型」 ·
+    已启用但零调用 <b style="color:${nZero ? 'var(--err)' : 'var(--ok)'}">${nZero}</b> 个${nOff ? `（另有 ${nOff} 个是配置里就停用/无渠道的，不参与评分）` : ''}<br>
+    ${verdict}<br>${top3 ? '<span class="dim">占比前三：' + esc(top3) + '</span>' : ''}
+    <br><span class="dim">口径：${esc(d.usageScope || '实际侧＝全部来源')}；应得侧观测 ${d.shareSamples || 0} 次决策${bandTxt ? ' · 未进席：' + esc(bandTxt) : ''}
+    （逐条原因与来源过滤在「打开分摊对照」里）</span>`;
+}
+
+loadAll();
+loadDiscoveryState();
+loadLoadShare();
+// 供应商页与系统页（熔断/EWMA 运行时表）都吃 loadAll 轮询——此前写死只在供应商页刷新
+/** 只在"当前显示的是供应商页或系统页、且页面可见"时才 15 秒静默刷新：
+ *  日志页不需要这两张表，别让它白挨每轮一次的 overview + client-queue。 */
+setInterval(() => {
+  if (document.hidden) return;
+  const vis = n => $('#tab-' + n).style.display !== 'none';
+  if (vis('providers') || vis('sys')) loadAll();
+}, 15000);
+</script>
+</body>
+</html>

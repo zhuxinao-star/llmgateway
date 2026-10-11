@@ -1,0 +1,162 @@
+# ============================================================
+# LLM Gateway 配置样例
+# 复制为 config.yaml 并填入真实 Key。填了真实 Key 的 config.yaml 不要提交到 git。
+# 启动: java -jar llmGateway.jar
+#   默认读工作目录下的 config/config.yaml；数据库跟着配置文件走（config/data/）
+# ============================================================
+
+server:
+  bind: 127.0.0.1
+  port: 8317
+
+# 网关本地鉴权 Key（Agent 工具 base_url=http://127.0.0.1:8317/v1 且填这个 Key）
+gateway-keys:
+  - "<你的网关 Key>"
+
+strategy: auto          # priority / latency / weighted / auto / cost-first
+
+defaults:
+  connectTimeoutMs: 3000
+  responseHeaderTimeoutMs: 30000
+  ttftTimeoutMs: 60000
+  channelBudgetMs: 30000
+  streamHeartbeatTimeoutMs: 30000
+  sseKeepAliveIntervalMs: 5000    # 下游 SSE 保活：候选真正开始吐流后，token 间空档每 5s 补一行 `: ping`，防工具读空闲超时断开；0=关闭
+  totalBudgetMs: 240000
+  compressCallTimeoutMs: 45000        # 压缩子调用单条超时(ms)：非流式，免费上游挂死时从旧 120s 腰斩到 45s（>健康全量压缩 39s）
+  compressOverallBudgetMs: 60000      # 整轮压缩墙钟上限(ms)：候选链累计最多等 60s，超时即走硬截断降级，不再拖死用户那一轮
+  maxAttempts: 3
+  circuitBreakerThreshold: 3
+  circuitBreakerBaseCooldownMs: 60000
+  circuitBreakerMaxCooldownMs: 1800000
+  rateLimitCooldownMs: 30000
+  quotaCooldownMs: 600000    # 429 insufficient_quota（配额耗尽）专用：短期不会恢复，长冷却
+  catalogRefreshMinutes: 5
+  catalogFetchTimeoutMs: 10000
+  ewmaAlpha: 0.3
+  hedgeDelayMs: 2500             # 对冲延迟：主选超时未出首字时并发次选竞速（0=关闭）
+  hedgeMaxContextTokens: 10000    # 输入超过此 token 数禁用对冲（大请求纯串行 failover）
+  contextCompressThresholdTokens: 60000  # 上下文自动压缩阈值（0=关闭）：超限时网关先把历史压成摘要
+  contextCompressModel: free-fast           # 压缩用模型（组名或点名）；不配=压缩功能关闭
+  keepRecentMessages: 15                    # 压缩时保留最近 N 条消息原文
+  clientMaxConcurrency: 2                    # 同一工具(client)的最大并发转发数：超并发排队等上一个完成（0=关闭）
+  clientMaxConcurrencyWaitMs: 30000          # 排队等待许可超时（ms）：超时放行撞墙兜底，绝不阻塞
+  # --- 路由评分留痕（管理页"评分与分摊"的数据源）---
+  # 每次真实请求都会算一份"候选排序快照"（每个供应商/模型的综合分 + 13 个因子 + 被门控出局的原因）。
+  # 快照单份 5~15KB，Agent 连发时全量落库会挤占 SQLite 单写连接，所以默认只抽样存库；内存环形缓冲始终保留最近 200 条（不受采样影响）。
+  rankTraceEnabled: true      # false=彻底关闭留痕（评分沙盘仍可用，它是无状态现算）
+  rankTraceSampleRate: 0.05   # 落库采样率 0~1：0.05=约每 20 条真实请求存 1 条；请求链路页按 traceId 精确查的那条一定在内存里能查到
+  rankTraceKeepDays: 7        # 库内留痕保留天数，超期自动清理（同时受最多 3000 条的硬上限约束）
+
+providers:
+  # --- OpenAI 兼容：直接透传 ---
+  - id: deepseek
+    name: DeepSeek 官方
+    baseUrl: https://api.deepseek.com/v1
+    protocol: openai
+    priority: 2
+    defaultCostTier: low
+    channels:
+      - id: main
+        apiKey: "sk-你的deepseek密钥"
+        weight: 1
+    # 可选：账户余额端点（管理页"查上游"会顺带查询展示）。
+    # path 相对 baseUrl（以 http 开头则视为完整 URL）；fields 按序取第一个命中的数字路径，
+    # 支持数组下标；subtract-fields 从前值扣减（如 openrouter 的 已购-已用）；currency-field 取币种，
+    # 无币种用 unit 标注。不支持余额端点的供应商不写此块即可。
+    balance:
+      path: /user/balance
+      fields: ["balance_infos.0.total_balance"]
+      currency-field: "balance_infos.0.currency"
+
+  - id: zhipu
+    name: 智谱
+    baseUrl: https://open.bigmodel.cn/api/paas/v4
+    protocol: openai
+    priority: 1
+    defaultCostTier: low
+    channels:
+      - id: flash-free
+        apiKey: "你的智谱密钥"
+        weight: 1
+    static-models: []      # 智谱支持 /v1/models，可留空
+
+  - id: moonshot
+    name: 月之暗面
+    baseUrl: https://api.moonshot.cn/v1
+    protocol: openai
+    priority: 3
+    defaultCostTier: standard
+    channels:
+      - id: main
+        apiKey: "sk-你的moonshot密钥"
+
+  - id: siliconflow
+    name: 硅基流动
+    baseUrl: https://api.siliconflow.cn/v1
+    protocol: openai
+    priority: 4
+    defaultCostTier: low
+    channels:
+      - id: key1
+        apiKey: "sk-你的硅基流动密钥"
+        weight: 2
+      - id: key2
+        apiKey: "sk-你的硅基流动密钥2"
+        weight: 1
+
+  # --- Anthropic 原生协议（自动协议转换） ---
+  - id: anthropic
+    name: Anthropic 官方
+    baseUrl: https://api.anthropic.com/v1
+    protocol: anthropic
+    # 境外源站直连被前置拦截时，给这一家单独指定 HTTP 代理（转发、查上游模型清单、余额三条路都走它）。
+    # 值是本机代理的 HTTP 端口（Clash/V2Ray 常见 7890/7897）。不填=直连。
+    # proxy: http://127.0.0.1:7897
+    priority: 5
+    defaultCostTier: premium
+    channels:
+      - id: main
+        apiKey: "sk-ant-你的密钥"
+
+  # --- 本地 Ollama（无鉴权可留 apiKey 空串） ---
+  - id: ollama
+    name: 本地 Ollama
+    baseUrl: http://127.0.0.1:11434/v1
+    protocol: openai
+    priority: 0
+    defaultCostTier: free
+    dailyTokenLimit: 2000000        # 提供商整包日预算
+    channels:
+      - id: local
+        apiKey: "ollama"
+    static-models:                  # Ollama 不支持 /v1/models 标准响应时的兜底
+      - qwen2.5:7b
+      - llama3.1:8b
+
+# (提供商, 模型) 粒度覆盖：优先级/费用档/日预算
+routing-overrides:
+  - providerId: zhipu
+    model: glm-4-flash
+    priority: 0          # 免费模型拉到最常用
+    costTier: free
+    dailyTokenLimit: 1000000
+  - providerId: zhipu
+    model: glm-4-plus
+    priority: 6          # 贵的降到兜底位
+    costTier: premium
+  - providerId: deepseek
+    model: deepseek-chat
+    alias: ""            # 可选：上游真实模型名与此不同时填写
+
+# 虚拟模型分组：工具侧只请求组名，网关在组内按优先级+策略智能选路
+# autoAll: true = 自动组（推荐）：动态包含所有供应商的全部手工配置模型，增删模型自动同步
+groups:
+  - name: free-fast
+    autoAll: true
+    members: []
+  # 静态组示例（只要特定几家时用）：
+  # - name: my-static-group
+  #   members:
+  #     - { providerId: zhipu, model: glm-4-flash, priority: 0 }
+  #     - { providerId: deepseek, model: deepseek-chat, priority: 1 }

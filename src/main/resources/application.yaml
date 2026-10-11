@@ -1,0 +1,16 @@
+server:
+  port: 8317
+  address: 127.0.0.1
+
+spring:
+  mvc:
+    async:
+      request-timeout: 180000
+  servlet:
+    multipart:
+      enabled: false
+
+gateway:
+  config-path: config/config.yaml
+  # 留空=数据库跟着配置文件的父目录走（config/data/）；scripts\start.bat 会用环境变量 GW_DB_PATH 指到项目根的 data\
+  db-path: ${GW_DB_PATH:}

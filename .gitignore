@@ -1,0 +1,12 @@
+target/
+config/config.yaml
+config/data/
+logs/
+*.log
+*.db
+*.db-wal
+*.db-shm
+*.db.bak*
+.idea/
+*.iml
+.vscode/

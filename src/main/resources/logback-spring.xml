@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <!-- 日志目录：默认仍是工作目录下的 logs（IDE 直接 Run 不受影响）；
+       服务脚本用环境变量 GW_LOG_DIR（或 -DGW_LOG_DIR=...）把日志指到项目外的统一日志目录 -->
+  <property name="LOG_HOME" value="${GW_LOG_DIR:-logs}"/>
+
+  <!-- 应用日志（启动/路由/熔断等） -->
+  <appender name="APP" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>${LOG_HOME}/app.log</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+      <fileNamePattern>${LOG_HOME}/app.%d{yyyy-MM-dd}.log</fileNamePattern>
+      <maxHistory>14</maxHistory>
+    </rollingPolicy>
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level %logger{20} - %msg%n</pattern>
+      <charset>UTF-8</charset>
+    </encoder>
+  </appender>
+
+  <!-- 请求日志（REQUEST logger 专用，每次请求一行） -->
+  <appender name="REQUEST" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>${LOG_HOME}/gateway.log</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+      <fileNamePattern>${LOG_HOME}/gateway.%d{yyyy-MM-dd}.log</fileNamePattern>
+      <maxHistory>30</maxHistory>
+    </rollingPolicy>
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS}|%msg%n</pattern>
+      <charset>UTF-8</charset>
+    </encoder>
+  </appender>
+
+  <!-- 控制台（开发期看） -->
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level %logger{20} - %msg%n</pattern>
+      <charset>UTF-8</charset>
+    </encoder>
+  </appender>
+
+  <logger name="REQUEST" level="INFO" additivity="false">
+    <appender-ref ref="REQUEST"/>
+  </logger>
+
+  <logger name="com.gw" level="DEBUG"/>
+
+  <root level="INFO">
+    <appender-ref ref="CONSOLE"/>
+    <appender-ref ref="APP"/>
+  </root>
+</configuration>
