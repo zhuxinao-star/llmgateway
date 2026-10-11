@@ -10,22 +10,43 @@
 
 ### 1. 构建与启动
 
-需要 JDK 21（Spring Boot 3 用虚拟线程，低版本跑不起来）。构建产物是单个 fat jar，运行不依赖任何外部数据库。
+需要 JDK 21（Spring Boot 3 用虚拟线程，17 也跑不起来）。构建产物是单个 fat jar，运行不依赖任何外部数据库。
+
+**Windows：仓库自带脚本，直接跑就行**
+
+```bat
+scripts\doctor.bat      :: 先自检：它把找到的 JDK/Maven/端口/库/日志位置逐条打出来
+scripts\build.bat       :: 产出 target\llmGateway.jar
+copy config\config.example.yaml config\config.yaml   :: 填你自己的上游 Key
+scripts\start.bat
+```
+
+`stop.bat` / `status.bat` / `restart.bat` 是配套的停服、探活、重启。
+
+**不用脚本（Linux/Mac 或你已有工具链）**：
 
 ```bash
 mvn -q package -DskipTests          # 产出 target/llmGateway.jar
-java -jar target/llmGateway.jar     # 工作目录需能读到 config/config.yaml
+java -jar target/llmGateway.jar     # 工作目录＝项目根（要能读到 config/config.yaml）
 ```
 
 首次运行先准备配置：把 `config/config.example.yaml` 复制为 `config/config.yaml`，填入你自己的上游 Key。
 `config/config.yaml` 已被 `.gitignore` 排除（里面是真实密钥），提交前请再确认一次。
 
-启动成功标志：`logs/app.log` 出现 `LLM Gateway 启动完成: http://127.0.0.1:8317`。
+启动成功标志：`logs/app.log` 出现 `Tomcat started on port 8317`，或 `scripts\status.bat` 打 `UP HTTP=200`。
 探活：`GET http://127.0.0.1:8317/api/overview`（没有 `/api/health` 端点）。
 
-> 本仓库只含源码、配置模板与文档。作者机器上还有一套 Windows 启停/构建脚本（`start/stop/restart/build/jar-patch/deploy-dev`）和一个无源码部署包，它们按本机目录布局写了绝对路径，未随仓库发布。
+**下载后要不要改脚本里的路径？基本不用。** 七个脚本的路径只在一处解析（`scripts\_env.bat`）：项目根＝`scripts\` 的上一级（并校验那里有 `pom.xml`，没有就报 `[layout error]` 退出），JDK 按 `GW_JDK` → `tools\jdk-*` → `JAVA_HOME` → PATH 找，Maven 按 `GW_MVN` → `tools\apache-maven-*\mvn.cmd` → PATH 找，数据和日志默认落项目根下的 `data\`、`logs\`。克隆到任何目录、路径带空格括号都不影响。要挪动或指定，用这七个环境变量（同一个窗口里设好再调用脚本）：
 
-> `docs/部署指南.md` 与 `docs/管理页使用指南.md` 按作者本机工作区书写（含未发布的 `scripts\`、`tools\`）；只想要仓库版，照上面两条命令即可。
+| 变量 | 作用 |
+|---|---|
+| `GW_JDK` | 指到 JDK 21 目录（含 `bin\java.exe` 的那层，不是 `bin`） |
+| `GW_MVN` | 指到 `mvn.cmd` |
+| `GW_BASE` | 一次把 `data\` 和 `logs\` 挪到别处 |
+| `GW_DB_PATH` · `GW_LOG_DIR` | 单独指定库 / 日志位置（优先于 `GW_BASE`） |
+| `GW_PORT` · `GW_HOST` | 换监听端口 / 网卡（脚本注入 `-Dserver.port`、`-Dserver.address`，确实生效） |
+
+改完跑 `scripts\doctor.bat` 确认，不用猜。**端口那条有个坑**：真正决定监听的是 `src/main/resources/application.yaml` 的 `server.port`，`config/config.yaml` 里的 `server: bind/port` 只用来打印启动那一行日志，改它不生效——细节与实测见 `docs/部署指南.md` 第 3 节。
 
 ### 2. Agent 工具接入（ZCode / Cline / Claude Code 等）
 
@@ -122,6 +143,8 @@ curl -N http://127.0.0.1:8317/v1/chat/completions \
 
 排查示例：`grep "status=FAILED" logs/gateway.log`、`grep "model=free-fast" logs/gateway.log`。
 
+目录位置由 `GW_LOG_DIR` 决定（`scripts\start.bat` 会指到项目根的 `logs\`）；不带脚本直接 `java -jar` 时写工作目录下的 `logs\`。`scripts\status.bat log` 直接看 app.log 末尾。
+
 ---
 
 ## 四、配置文件说明（config/config.yaml）
@@ -129,7 +152,7 @@ curl -N http://127.0.0.1:8317/v1/chat/completions \
 管理台的所有增删改都写回这个文件；也可以直接手工编辑，编辑完在管理台「系统 → 热重载配置文件」即可生效（不用重启）。
 
 ```yaml
-server: { bind: 127.0.0.1, port: 8317 }
+server: { bind: 127.0.0.1, port: 8317 }   # 只决定启动日志打什么；实际监听见第一节末尾那条坑
 gateway-keys: ["<你的网关 Key>"]     # 本地鉴权 Key（可配多个），自己定强随机值，别用示例值
 strategy: auto                          # priority/latency/weighted/auto/cost-first/free-only/paid-only
 
@@ -169,8 +192,8 @@ groups:                                  # 虚拟模型
 - **额度烧太快**：给该家的模型加 routing 条目 `dailyTokenLimit`，当日用完自动摘除，次日零点自动恢复。
 
 ### 数据
-- SQLite 库在 `config/data/llm-gateway.db`，删掉即清空全部统计（请求日志/用量/熔断快照）。
-- 备份 = 备份 `config/` 目录（配置 + 数据库）。
+- SQLite 库：用 `scripts\start.bat` 起就在 `<项目根>\data\llm-gateway.db`；不带脚本直接 `java -jar` 时回到默认 `config/data/llm-gateway.db`（`GW_DB_PATH` 留空即用默认）。删掉即清空全部统计（请求日志/用量/熔断快照）。
+- 备份 = 备份 `config\config.yaml` + 那个 `.db` 文件（停服后备份，或先跑一次 `PRAGMA wal_checkpoint(TRUNCATE)`）。
 - 管理台写入是原子替换（先写 .tmp 再改名），万一写坏可从 `config.yaml.tmp` 手工恢复。
 
 ### 常见问题
@@ -221,27 +244,36 @@ groups:                                  # 虚拟模型
 ## 七、目录结构
 
 ```
-llmGateway/
-├── build.bat / start.bat / test.bat / kill_test.bat
+项目根（= 仓库根，有 pom.xml 的那一层）/
 ├── pom.xml
+├── scripts/                 # 已发布脚本：_env / doctor / start / stop / restart / status / build
 ├── config/
-│   ├── config.yaml          # 运行配置（含真实 Key，勿外传/git）
-│   └── data/                # SQLite 数据库
+│   ├── config.example.yaml  # 模板（无密钥）
+│   └── config.yaml          # 运行配置（含真实 Key，勿外传/git）
+├── data/                    # SQLite 库（脚本默认落这里，不入库；不带脚本时在 config/data/）
 ├── logs/                    # gateway.log（请求日志）+ app.log（应用日志）
-├── tools/                   # 便携 JDK21 + Maven3.9 + settings.xml（华为云镜像）
-├── config-test.yaml         # Mock 测试配置
+├── docs/                    # 部署指南 / 管理页使用指南 / 目录结构说明
+├── target/                  # 构建产物 llmGateway.jar（不入库）
+├── src/main/resources/
+│   ├── application.yaml     # 真正决定端口/网卡、库位置、配置路径（改端口改这里）
+│   ├── logback-spring.xml   # 日志：GW_LOG_DIR 可覆盖，默认工作目录下 logs/
+│   └── static/ui/           # 管理台（单页，打包进 jar）
 └── src/main/java/com/gw/
-    ├── gateway/    # 接入层：鉴权、请求解析、SSE 写出、错误模型
+    ├── gateway/    # 接入层：鉴权、请求解析、SSE 写出与保活、错误模型
     ├── router/     # 路由：模型名→候选（直接/前缀点名/组展开）
-    ├── policy/     # 策略：评分/EWMA/熔断/429/额度/并发（状态唯一权威）
-    ├── forward/    # 转发：超时预算、attempt 循环、多 Key
+    ├── policy/     # 策略：评分/EWMA/熔断/429/额度/并发/抽签分摊/决策留痕（状态唯一权威）
+    ├── forward/    # 转发：超时预算、attempt 循环、多 Key、上下文压缩、对冲
     ├── provider/   # 适配器：OpenAI 直通 + Anthropic 双向转换（含流式）
-    ├── catalog/    # 目录：后台定时拉 /v1/models
+    ├── catalog/    # 目录：后台定时拉 /v1/models、余额探测
     ├── stats/      # 统计：SQLite 异步落库 + gateway.log 请求日志
     ├── config/     # 配置：YAML→校验→快照；ConfigWriter 持久化写回
     ├── store/      # SQLite：WAL、异步批量写、快照恢复
+    ├── probe/      # 对账：模型可用性探测与自动停用/恢复
+    ├── util/       # ProviderClients：三条出站路径共用的代理化 HttpClient 工厂
     └── admin/      # 管理 REST（供应商/渠道/路由/分组 CRUD + 用量聚合）
 ```
+
+`tools/`（便携 JDK+Maven）**不在仓库里**：脚本会顺带看一眼 `<项目根>\tools\jdk-*` 和 `tools\apache-maven-*`，你把便携工具链放进去就自动用，不放就用 `JAVA_HOME`/PATH 或 `GW_JDK`/`GW_MVN`（见第一节）。
 
 ## 八、核心机制速查
 
@@ -264,8 +296,8 @@ llmGateway/
 
 | 文档 | 内容 |
 |---|---|
-| `部署指南.md` | 从零跑起来：JDK、配置字段全解、代理与出站、常见故障 |
+| `部署指南.md` | 从零跑起来：仓库布局、脚本的路径规则与七个覆盖变量、端口那条坑、配置字段全解、代理与出站、常见故障 |
 | `管理页使用指南.md` | 管理台每个页面/每个字段怎么用 |
-| `目录结构说明.md` | 作者本机工作区的目录分区（源码/文档/配置/数据/日志/脚本/部署包各在哪、为什么这么分） |
+| `目录结构说明.md` | 前半：仓库布局与已发布脚本；后半：作者本机的工作区分区与整理史（那部分不在仓库里） |
 
 本仓库只发布**部署、使用与目录结构**三份文档；架构设计、历轮改造计划与验收记录属于开发过程稿，不随仓库发布，代码本身即是最权威的实现说明。

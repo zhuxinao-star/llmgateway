@@ -1,6 +1,8 @@
 target/
 config/config.yaml
 config/data/
+# runtime dirs created by scripts\start.bat (GW_BASE default = this folder)
+data/
 logs/
 *.log
 *.db

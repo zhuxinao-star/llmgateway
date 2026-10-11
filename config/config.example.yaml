@@ -1,10 +1,14 @@
 # ============================================================
 # LLM Gateway 配置样例
 # 复制为 config.yaml 并填入真实 Key。填了真实 Key 的 config.yaml 不要提交到 git。
-# 启动: java -jar llmGateway.jar
-#   默认读工作目录下的 config/config.yaml；数据库跟着配置文件走（config/data/）
+# 启动: Windows 用 scripts\start.bat（先跑 scripts\doctor.bat 自检），
+#       或 java -jar target\llmGateway.jar（工作目录＝项目根）
+#   默认读工作目录下的 config/config.yaml；不带环境变量时数据库跟着配置文件走（config/data/）
 # ============================================================
 
+# 注意：server 这两项只被用来打印启动日志那一行，不控制实际监听。
+# 改端口/网卡：临时设环境变量 GW_PORT / GW_HOST（scripts 会注入 -Dserver.port/-Dserver.address，实测生效）；
+# 长期改 src/main/resources/application.yaml 的 server.port / server.address，然后重新 build.bat。
 server:
   bind: 127.0.0.1
   port: 8317
