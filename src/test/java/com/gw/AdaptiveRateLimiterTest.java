@@ -2,6 +2,7 @@ package com.gw;
 
 import com.gw.policy.AdaptiveRateLimiter;
 
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -17,6 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *   6. 撞墙密度：近 5 分钟撞 429 计次、按渠道隔离、样本滑出即自动复原
  *   7. L 因子映射：瞬时压力与撞墙密度取更狠的一侧，地板 0.2、密度满 0.35
  *   8. 撤席门槛：持续撞墙 + 学到的额度本来就紧才撤席；跨 Key 取最紧的那把
+ *   9. 慢性限流：长窗口 429 占比（读库、重启不丢）的降权与撤席门槛
  */
 public class AdaptiveRateLimiterTest {
 
@@ -166,6 +168,53 @@ public class AdaptiveRateLimiterTest {
                 g.providerRateLimits("zhipu") == 0 && g.tightestReqCeiling("zhipu") == 0, "");
         g.reset("amd");
         check("reset 按家清掉撞墙样本", g.providerRateLimits("amd") == 0, "");
+
+        System.out.println("== 9. 慢性限流（第三只眼：长窗口读库，重启不丢）==");
+        // 前面 6/8 号用例暴露的盲区：两次 429 相隔 6 分钟 → 密度归零、L=1.0、抽签席照占，
+        // 可这家其实整天都在撞墙（实测某免费上游三天 106 发里 79 发 429）。
+        check("纯函数：达撤席线且样本够→撤席",
+                AdaptiveRateLimiter.seatBlockedByChronic(0.35, 20, 0.3, 8), "");
+        check("纯函数：比例够但样本太少不判（防 3 发里 2 发 429 误伤）",
+                !AdaptiveRateLimiter.seatBlockedByChronic(0.9, 5, 0.3, 8), "");
+        check("纯函数：没撞过墙（比例 0）→ 绝不撤席",
+                !AdaptiveRateLimiter.seatBlockedByChronic(0.0, 500, 0.3, 8), "");
+        check("纯函数：撤席线=0 表示关掉这一层",
+                !AdaptiveRateLimiter.seatBlockedByChronic(0.9, 500, 0.0, 8), "");
+        check("降权：达线给地板 0.2",
+                AdaptiveRateLimiter.chronicPenaltyFactor(0.6, 50, 8, 0.3) == 0.2,
+                "f=" + AdaptiveRateLimiter.chronicPenaltyFactor(0.6, 50, 8, 0.3));
+        check("降权：线的一半→线性给 0.6（不是开关式跳变）",
+                Math.abs(AdaptiveRateLimiter.chronicPenaltyFactor(0.15, 50, 8, 0.3) - 0.6) < 1e-9,
+                "f=" + AdaptiveRateLimiter.chronicPenaltyFactor(0.15, 50, 8, 0.3));
+        check("降权：样本不足→1.0（未知不罚）",
+                AdaptiveRateLimiter.chronicPenaltyFactor(0.9, 7, 8, 0.3) == 1.0, "");
+        AdaptiveRateLimiter h = newLimiter();
+        NOW.set(morning(10, 0));
+        Map<String, long[]> stats = new java.util.HashMap<>();
+        stats.put("sensenova", new long[]{100, 40});     // 100 发里 40 发 429 = 40%
+        stats.put("agnes", new long[]{100, 2});          // 偶发抖动
+        h.setChronicStats(stats, NOW.get());
+        check("读库后的占比算得对（40%）", Math.abs(h.chronicLimitRatio("sensenova") - 0.4) < 1e-9,
+                "ratio=" + h.chronicLimitRatio("sensenova"));
+        check("没见过数据的家占比 0", h.chronicLimitRatio("unknown") == 0.0, "");
+        check("样本数可查（界面要写明凭什么撤席）", h.chronicSamples("sensenova") == 100, "");
+        check("达线家：撤席 + 压到地板",
+                AdaptiveRateLimiter.seatBlockedByChronic(h.chronicLimitRatio("sensenova"),
+                        h.chronicSamples("sensenova"), 0.3, 8)
+                        && h.chronicPenalty("sensenova", 8, 0.3) == 0.2, "");
+        check("抖动家（2%）：保留席位、几乎不罚",
+                !AdaptiveRateLimiter.seatBlockedByChronic(h.chronicLimitRatio("agnes"),
+                        h.chronicSamples("agnes"), 0.3, 8)
+                        && h.chronicPenalty("agnes", 8, 0.3) > 0.9,
+                "f=" + h.chronicPenalty("agnes", 8, 0.3));
+        // 管理页"重新学习"必须连慢性层一起清，否则 60 秒后又靠同一份库数据把席撤了
+        h.reset("sensenova");
+        check("reset 一起清慢性层", h.chronicLimitRatio("sensenova") == 0.0
+                && h.chronicSamples("sensenova") == 0 && h.chronicPenalty("sensenova", 8, 0.3) == 1.0, "");
+        check("reset 不连坐别家", h.chronicLimitRatio("agnes") > 0.0, "");
+        h.setChronicStats(Map.of(), 0);
+        check("传空=关掉这一层（全部占比归零、不罚）",
+                h.chronicLimitRatio("agnes") == 0.0 && h.chronicPenalty("agnes", 8, 0.3) == 1.0, "");
 
         System.out.println();
         System.out.println(failures == 0 ? "全部通过" : (failures + " 个失败"));

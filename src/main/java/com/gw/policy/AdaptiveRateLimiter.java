@@ -137,6 +137,13 @@ public class AdaptiveRateLimiter {
         boolean removed = providerStates.keySet().removeIf(k -> k.equals(providerId) || k.startsWith(providerId + "\n"));
         // 同时清空该 provider 的输出 token 预算学习
         maxOutputTokens.keySet().removeIf(k -> k.startsWith(providerId + "\n"));
+        // 慢性层（读库的长期 429 比例）一起清：否则管理页点了"重新学习"，
+        // 60 秒后它又被同一份库数据撤席，手动能力等于没有。刷新周期 60s，接受其回潮。
+        if (chronicStats.containsKey(providerId)) {
+            Map<String, long[]> cs = new java.util.HashMap<>(chronicStats);
+            cs.remove(providerId);
+            chronicStats = Map.copyOf(cs);
+        }
         return removed;
     }
 
@@ -263,6 +270,56 @@ public class AdaptiveRateLimiter {
                 && learnedReqPerMin > 0 && learnedReqPerMin <= TIGHT_CEILING_REQ_PER_MIN;
     }
 
+    // ---- 慢性限流（第三只眼：长窗口读库，重启不丢）----
+    // 瞬时压力看 60 秒、撞墙密度看 5 分钟，两个都是"爆发检测器"，而且全在内存里。
+    // 实测坑：某免费上游三天 106 发里 79 发 429，但当天两次 429 相隔 6 分钟 → limits5m=0、压力=0、
+    // L=1.0、抽签席照占，还凭高分拿走四成流量。"这家长期撞墙"是 request_log 里的事实，
+    // 由这一层说话：内存学习重启清零，库里比例启动后第一发就能用。
+    private volatile Map<String, long[]> chronicStats = Map.of();   // providerId → {真实样本数, 其中 429 数}
+    private volatile long chronicStatsAt;
+
+    /** 定期刷入（由 PolicyService 随快照调度调）：providerId → [真实流量样本数, 其中限流数]。
+     *  传 null/空 = 该层关闭（不做任何降权与撤席）。 */
+    public void setChronicStats(Map<String, long[]> stats, long atMs) {
+        this.chronicStats = stats == null || stats.isEmpty() ? Map.of() : Map.copyOf(stats);
+        this.chronicStatsAt = atMs;
+    }
+
+    /** 该家长窗口的 429 占比 ∈ [0,1]；无样本=0（未知不罚） */
+    public double chronicLimitRatio(String providerId) {
+        long[] v = chronicStats.get(providerId);
+        if (v == null || v[0] <= 0) return 0.0;
+        return Math.min(1.0, (double) v[1] / v[0]);
+    }
+
+    /** 该家长窗口的真实流量样本数（巡检/体检/确认探测都不计入） */
+    public long chronicSamples(String providerId) {
+        long[] v = chronicStats.get(providerId);
+        return v == null ? 0 : v[0];
+    }
+
+    /** 慢性降权系数（叠在 L 因子上取更狠的一侧），阈值口径同撤席。 */
+    public double chronicPenalty(String providerId, int minSamples, double seatBlockRatio) {
+        return chronicPenaltyFactor(chronicLimitRatio(providerId), chronicSamples(providerId),
+                minSamples, seatBlockRatio);
+    }
+
+    /**
+     * 慢性降权（纯函数，便于单测）：以"撤席线"作为满罚刻度线性给。
+     *  比例达撤席线 → 地板 ×0.2；一半 → ×0.6；样本不足 minSamples 或没撞过墙 → ×1.0（不罚未知）。
+     *  地板与瞬时层同：长期撞墙的家仍可能在"别的家全挂"时被选中，不能把分压成 0。
+     */
+    public static double chronicPenaltyFactor(double limitRatio, long samples, int minSamples, double seatBlockRatio) {
+        if (samples < Math.max(1, minSamples) || limitRatio <= 0 || seatBlockRatio <= 0) return 1.0;
+        double rel = Math.min(1.0, limitRatio / seatBlockRatio);
+        return Math.max(FACTOR_FLOOR, 1.0 - (1.0 - FACTOR_FLOOR) * rel);
+    }
+
+    /** 慢性撤席（纯函数，便于单测）：样本足够且 429 占比达到撤席线 → 不占分摊抽签席（仍可兜底）。 */
+    public static boolean seatBlockedByChronic(double limitRatio, long samples, double seatBlockRatio, int minSamples) {
+        return samples >= Math.max(1, minSamples) && seatBlockRatio > 0 && limitRatio >= seatBlockRatio;
+    }
+
     private static double clamp01(double v) {
         return v < 0 ? 0 : Math.min(1.0, v);
     }
@@ -326,8 +383,25 @@ public class AdaptiveRateLimiter {
         out.put("densityFullLimits", DENSITY_FULL_LIMITS);
         out.put("bandGate", Map.of("minLimits", BAND_GATE_MIN_LIMITS,
                 "tightReqPerMin", TIGHT_CEILING_REQ_PER_MIN));
+        out.put("chronic", chronicView());
         out.put("maxOutputTokens", new LinkedHashMap<>(maxOutputTokens));
         out.put("providers", providers);
+        return out;
+    }
+
+    /** 慢性层概览（诊断："这家凭什么被压到地板/撤了席"要能给看数据的理由；只读库，重启也在） */
+    private Map<String, Object> chronicView() {
+        Map<String, Object> rows = new LinkedHashMap<>();
+        for (Map.Entry<String, long[]> e : chronicStats.entrySet()) {
+            Map<String, Object> r = new LinkedHashMap<>();
+            r.put("samples", e.getValue()[0]);
+            r.put("rateLimits", e.getValue()[1]);
+            r.put("limitRatio", Math.round(chronicLimitRatio(e.getKey()) * 1000.0) / 1000.0);
+            rows.put(e.getKey(), r);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("updatedAt", chronicStatsAt);
+        out.put("providers", rows);
         return out;
     }
 

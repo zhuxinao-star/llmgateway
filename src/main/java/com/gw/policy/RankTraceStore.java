@@ -217,11 +217,21 @@ public class RankTraceStore {
     }
 
     /**
-     * 一次窗口内的观测汇总：应得份额均值 + 未进抽签席原因计数 + 样本数。
+     * 一次窗口内的观测汇总：应得份额均值（模型级 + 供应商级）+ 未进抽签席原因计数 + 样本数。
      * 界面必须说清这些数是"几次决策"观测出来的，否则 3 条样本的均值看着和 300 条一样可信。
+     *
+     * <p>均值分母统一用"有席的决策数"（{@code seatedDecisions}）：一条决策里各家的份额本来就加总＝100%，
+     * 按"出现过的决策"各自取均值再去 sum 会算出 169% 这种数（供应商级汇总表就这么错过一次）。
+     *
+     * <p>{@code providerCapPctEffective}＝"本窗口实际生效的单家线"。份额封顶取的是
+     * {@code max(配置值, 1÷该决策占席家数)}——只有两家占席时不可能都 ≤35%，自动放宽到 50%。
+     * 界面判"谁超线"必须用这个数，否则家数少时会把合法的放宽标成红字（配置线 35%、有效线 50%）。
+     * 窗口内没有带封顶的决策时为 {@code null}（界面回落到配置线并注明）。
      */
-    public record ShareObservation(Map<String, Double> share, Map<String, Integer> bandOut,
-                                   int samples, int fromDb, int fromMem) {}
+    public record ShareObservation(Map<String, Double> share, Map<String, Double> providerShare,
+                                   Double providerCapPctEffective,
+                                   Map<String, Integer> bandOut,
+                                   int samples, int seatedDecisions, int fromDb, int fromMem) {}
 
     /** 采样库单次最多读多少条决策（均值不需要全量，也防止一次界面请求把几百 MB payload 读进内存） */
     private static final int SHARE_SCAN_MAX = 800;
@@ -237,7 +247,10 @@ public class RankTraceStore {
      * 截掉的是尾部，不影响份额与未进席原因的分类计数。
      */
     public ShareObservation observeShare(long fromTs, long toTs, String client, Integer maxTraces) {
-        Map<String, double[]> acc = new LinkedHashMap<>();   // provider\nmodel → [份额和, 样本数]
+        Map<String, Double> modelSum = new LinkedHashMap<>();   // provider\nmodel → 窗口内份额累加
+        Map<String, Double> provSum = new LinkedHashMap<>();    // provider → 窗口内份额累加
+        long[] seated = new long[1];                            // 有席的决策数＝两侧均值共同的分母
+        double[] capAcc = new double[2];                         // [0]=各决策有效封顶线之和，[1]=带封顶的决策数
         Map<String, Integer> bandOut = new LinkedHashMap<>();
         Set<String> counted = new HashSet<>();
         boolean byClient = client != null && !client.isBlank();
@@ -260,7 +273,10 @@ public class RankTraceStore {
                 Map<String, Object> m = Json.parseObject(payload);
                 String traceId = Json.str(m.get("traceId"));
                 if (traceId != null) counted.add(traceId);
-                if (accumulate(m.get("rows"), Boolean.TRUE.equals(m.get("loadShare")), acc, bandOut)) fromDb++;
+                Object capRaw = m.get("providerCapPct");
+                if (accumulate(m.get("rows"), Boolean.TRUE.equals(m.get("loadShare")),
+                        capRaw instanceof Number pn ? pn.doubleValue() : 0,
+                        modelSum, provSum, seated, capAcc, bandOut)) fromDb++;
             } catch (Exception e) {
                 log.warn("[rank-trace] 份额 payload 解析失败: {}", e.toString());
             }
@@ -271,24 +287,40 @@ public class RankTraceStore {
                 if (t.ts < fromTs || t.ts > toTs) continue;
                 if (byClient && !client.equalsIgnoreCase(String.valueOf(t.client))) continue;
                 if (t.traceId != null && !counted.add(t.traceId)) continue;   // 库里已数过，别重复计
-                if (accumulate(t.rows, t.loadShare, acc, bandOut)) fromMem++;
+                if (accumulate(t.rows, t.loadShare, t.providerCapPct,
+                        modelSum, provSum, seated, capAcc, bandOut)) fromMem++;
             }
         }
+        double den = seated[0];
         Map<String, Double> out = new LinkedHashMap<>();
-        acc.forEach((k, a) -> out.put(k, a[1] > 0 ? a[0] / a[1] : 0));
-        return new ShareObservation(out, bandOut, fromDb + fromMem, fromDb, fromMem);
+        Map<String, Double> pOut = new LinkedHashMap<>();
+        if (den > 0) {
+            modelSum.forEach((k, v) -> out.put(k, v / den));
+            provSum.forEach((k, v) -> pOut.put(k, v / den));
+        }
+        return new ShareObservation(out, pOut,
+                capAcc[1] > 0 ? Double.valueOf(capAcc[0] / capAcc[1]) : null,
+                bandOut, fromDb + fromMem, (int) seated[0], fromDb, fromMem);
     }
 
     /**
-     * 累加一条决策快照：抽签席份额进 {@code acc}，未进席原因码进 {@code bandOut}。
+     * 累加一条决策快照：抽签席份额进本条的局部和，未进席原因码进 {@code bandOut}。
      * 行可以是内存里的 {@code Row}，也可以是库里 payload 解析出的 Map——两条路径同一套口径。
      *
+     * <p>先在本条决策里汇总、再累加，是因为均值分母必须是"决策数"而不是"行数"：
+     * 一条决策里各家份额加总＝100%，把每个模型在"它出现过的那几次"里各自取均值再相加，
+     * 会得到各供应商合计 169% 这种不可能的数（封顶线本来就在这一层判，读的人只会更糊涂）。
+     *
+     * @param capPct 这条决策当时生效的份额封顶配置（0=未封顶），用于回算"本窗口有效线"
      * @return 这条决策是否贡献了样本（有席或有出局原因）
      */
-    private static boolean accumulate(Object rows, boolean loadShare,
-                                      Map<String, double[]> acc, Map<String, Integer> bandOut) {
+    private static boolean accumulate(Object rows, boolean loadShare, double capPct,
+                                      Map<String, Double> modelSum, Map<String, Double> provSum,
+                                      long[] seated, double[] capAcc, Map<String, Integer> bandOut) {
         if (!(rows instanceof Collection<?> col)) return false;
         int n = 0;
+        Map<String, Double> mLocal = new HashMap<>();
+        Map<String, Double> pLocal = new HashMap<>();
         for (Object o : col) {
             String provider, model, bandOutCode;
             boolean inBand;
@@ -303,14 +335,23 @@ public class RankTraceStore {
                 bandOutCode = Json.str(m.get("bandOut"));
             } else continue;
             if (inBand && share > 0) {
-                double[] a = acc.computeIfAbsent(provider + "\n" + model, k -> new double[2]);
-                a[0] += share;
-                a[1] += 1;
+                mLocal.merge(provider + "\n" + model, share, Double::sum);
+                if (provider != null) pLocal.merge(provider, share, Double::sum);
                 n++;
             } else if (loadShare && bandOutCode != null && !bandOutCode.isBlank()) {
                 // 只在"分摊确实生效"的决策里数未进席：关着分摊时每条决策都无席，数出来是误导
                 bandOut.merge(bandOutCode, 1, Integer::sum);
                 n++;
+            }
+        }
+        if (!mLocal.isEmpty()) {          // 有席才进分母：一家都没进席的决策对"谁该接几成"没有表态
+            seated[0]++;
+            mLocal.forEach((k, v) -> modelSum.merge(k, v, Double::sum));
+            pLocal.forEach((k, v) -> provSum.merge(k, v, Double::sum));
+            if (capPct > 0 && !pLocal.isEmpty()) {
+                // 有效线按"这一条决策"算再加总：占席家数少时封顶会自动放宽到均分线
+                capAcc[0] += Math.max(capPct, 1.0 / pLocal.size());
+                capAcc[1] += 1;
             }
         }
         return n > 0;

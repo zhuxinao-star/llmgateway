@@ -393,27 +393,77 @@ public class StatsDao {
     public record SnapshotRow(String providerId, String channelId, String model,
                               Double ewmaTtftMs, String state, Long coolDownUntil,
                               Integer consecutiveFailures, Double ewmaTokensPerSec,
-                              Double recentTtftMedian) {}
+                              Double recentTtftMedian, Long updatedAt) {
+        /** 持久化侧不需要回读时间戳，给个不带 updated_at 的构造口子（写入时由 DB 现算）。
+         *  必须 public：PolicyService 在另一个包（com.gw.policy）里构造它。 */
+        public SnapshotRow(String providerId, String channelId, String model, Double ewmaTtftMs, String state,
+                           Long coolDownUntil, Integer consecutiveFailures, Double ewmaTokensPerSec,
+                           Double recentTtftMedian) {
+            this(providerId, channelId, model, ewmaTtftMs, state, coolDownUntil, consecutiveFailures,
+                    ewmaTokensPerSec, recentTtftMedian, null);
+        }
+    }
 
-    /** 最近 N 条成功请求的 TTFT（常规上下文）：进程重启后给分摊抽签门槛/速度系数补"最近实测"样本 */
-    public List<Long> recentOkTtfts(String providerId, String model, int limit, long maxInputTokens) {
-        String sql = "SELECT ttft_ms FROM request_log WHERE provider_id=? AND model_real=? AND status='OK' " +
-                "AND ttft_ms IS NOT NULL AND (tokens_in IS NULL OR tokens_in <= ?) ORDER BY id DESC LIMIT ?";
+    /** 最近 N 条成功请求的 TTFT（常规上下文）：进程重启后给分摊抽签门槛/速度系数补"最近实测"样本。
+     *  三条口径与实时评分侧保持一致，否则回填会把实时侧刻意排除的东西又塞回来：
+     *   - 排除 client='probe'（巡检 ping 不代表真实请求速度，实时侧 recordSuccess 同样不进窗）；
+     *   - 排除 ttft_ms < minTtftMs 的测量伪值（修复前流式路径把首字记成 0~3ms）；
+     *   - 模型按大小写不敏感匹配（同一模型的不同拼法共用一份速度历史，别把样本切两半）。 */
+    public List<Long> recentOkTtfts(String providerId, String model, int limit, long maxInputTokens, long minTtftMs) {
+        String sql = "SELECT ttft_ms FROM request_log WHERE provider_id=? AND lower(model_real)=lower(?) AND status='OK' " +
+                "AND ttft_ms IS NOT NULL AND ttft_ms >= ? AND (client IS NULL OR client NOT IN ('probe','selfcheck','reconcile')) " +
+                "AND (tokens_in IS NULL OR tokens_in <= ?) ORDER BY id DESC LIMIT ?";
         try {
-            return db.queryList(sql, rs -> rs.getLong(1), providerId, model, maxInputTokens, limit);
+            return db.queryList(sql, rs -> rs.getLong(1), providerId, model, minTtftMs, maxInputTokens, limit);
         } catch (SQLException e) {
             return List.of();
         }
     }
 
+    /** 慢性限流观测：近窗口内每家（跨所有 Key、真实流量）的尝试数与 429 数。
+     *  限流学习是内存态（重启清零、6 小时无流量淡出），而"这家长期被限流"是库里的既成事实；
+     *  这一路只读库，让降权/撤席在重启后立刻恢复，不必重新撞墙才知道。
+     *  隔离客户端（巡检/体检/确认探测）不算：它们不代表用户真实流量对额度的占用。 */
+    public Map<String, long[]> chronicRateLimits(long sinceTs) {
+        String sql = "SELECT provider_id, COUNT(*), SUM(CASE WHEN error_class='RATE_LIMIT' THEN 1 ELSE 0 END) " +
+                "FROM request_log WHERE ts >= ? AND (client IS NULL OR client NOT IN ('probe','selfcheck','reconcile')) " +
+                "GROUP BY provider_id";
+        Map<String, long[]> out = new HashMap<>();
+        try {
+            db.queryList(sql, rs -> {
+                out.put(rs.getString(1), new long[]{rs.getLong(2), rs.getLong(3)});
+                return null;
+            }, sinceTs);
+        } catch (SQLException e) {
+            return Map.of();
+        }
+        return out;
+    }
+
     public List<SnapshotRow> loadRuntimeSnapshots() {
-        String sql = "SELECT provider_id, channel_id, model, ewma_ttft_ms, state, cool_down_until, consecutive_failures, ewma_tokens_per_sec, recent_ttft_ms FROM runtime_snapshot";
+        String sql = "SELECT provider_id, channel_id, model, ewma_ttft_ms, state, cool_down_until, consecutive_failures, ewma_tokens_per_sec, recent_ttft_ms, updated_at FROM runtime_snapshot";
         try {
             return db.queryList(sql, rs -> new SnapshotRow(rs.getString(1), rs.getString(2), rs.getString(3),
                     (Double) rs.getObject(4), rs.getString(5), rs.getLong(6), rs.getInt(7),
-                    (Double) rs.getObject(8), (Double) rs.getObject(9)));
+                    (Double) rs.getObject(8), (Double) rs.getObject(9), rs.getLong(10)));
         } catch (SQLException e) {
             return List.of();
+        }
+    }
+
+    /** 清掉历史遗留的脏快照行：channel_id 里累积的命名空间标记（每次重启多一个 \u0001，
+     *  永远匹配不到真实渠道，Key 冷却跨重启恢复因此形同虚设），以及同一模型按大小写分裂成的
+     *  旧行（新写入一律小写归一，旧行不再会被读到，留着只会让表膨胀）。
+     *  @return 删除行数（诊断/日志用） */
+    public int cleanupRuntimeSnapshotJunk() {
+        String pred = "instr(channel_id, char(1)) > 0 OR (model <> '*' AND model <> lower(model))";
+        try {
+            List<Integer> n = db.queryList("SELECT COUNT(*) FROM runtime_snapshot WHERE " + pred,
+                    rs -> rs.getInt(1));
+            db.syncWrite("DELETE FROM runtime_snapshot WHERE " + pred);
+            return n.isEmpty() ? 0 : n.get(0);
+        } catch (SQLException e) {
+            return 0;
         }
     }
 

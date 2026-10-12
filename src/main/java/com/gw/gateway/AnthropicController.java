@@ -466,7 +466,8 @@ public class AnthropicController {
                 usage = Json.obj("prompt_tokens", st.usageAcc.getOrDefault("prompt_tokens", 0L),
                         "completion_tokens", st.outputTokens);
             }
-            Long ttft = firstTokenAt == null ? null : Long.parseLong(firstTokenAt);
+            Long ttft = firstTokenAt == null ? null
+                    : ForwardEngine.streamTtftMs(r, Long.parseLong(firstTokenAt));
             recordSuccess(c, model, ttft, usage, attemptNo, profile, System.currentTimeMillis() - startMs, client, compress);
             // 流式输出质量自反馈（同非流式：截断/空回复软失败降权 + 早停嫌疑）
             judgeStreamQuality(c, req, streamFinish, streamSawContent, streamSawToolUse, usage,

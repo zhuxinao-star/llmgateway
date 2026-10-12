@@ -97,6 +97,17 @@ public class ForwardEngine {
     }
 
     /**
+     * 流式请求的真实首字耗时（ms）：转发层首字（{@code ttftMs}，纳秒）与"中继循环里第一条真内容行"
+     *  的偏移取大者。中继循环（streamToClient）在 execute 返回 STREAM 之后才起表，那一刻首字早已
+     *  到手，所以单看偏移必然得到 0~3ms 的伪样本——它曾把走 SSE 的家（Claude Code 全部流量）的
+     *  速度中位数压到真实值的几十分之一，直接扭曲分摊份额与慢门槛。
+     * @param relayOffsetMs 中继内从 streamToClient 起表到第一条真内容行的毫秒数（<0 视为 0）
+     */
+    public static long streamTtftMs(ForwardResult r, long relayOffsetMs) {
+        return Math.max(r.ttftMs / 1_000_000, Math.max(0, relayOffsetMs));
+    }
+
+    /**
      * 单候选执行一次转发。
      * @param openAiRequest OpenAI 格式请求体
      * @param candidate 候选

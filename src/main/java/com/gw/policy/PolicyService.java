@@ -37,6 +37,17 @@ public class PolicyService {
     private final ConcurrentHashMap<String, UsageCounter> usage = new ConcurrentHashMap<>();
     /** 大上下文阈值：输入超过此 token 数的请求，其 TTFT 不进速度 EWMA（预填充开销不代表模型速度） */
     private static final long LARGE_CONTEXT_TOKENS = 10_000;
+    /** 首字测量下限（ms）：低于此值不可能真是首字（一个 HTTPS 往返就 >50ms），当测量伪值剔除。
+     *  历史坑：流式路径曾从中继起表才计时，把走 SSE 的家（Claude Code 全部流量）首字记成 0~3ms，
+     *  速度中位数被压到真实值的几十分之一，分摊份额直接失真（lingxiongkeji 曾独占 43%）。 */
+    private static final long TTFT_ARTIFACT_FLOOR_MS = 50;
+    /** 恢复的"最近实测中位数"保鲜期（ms）：过期就重新从请求日志回填。
+     *  没有这条，一次陈旧慢值会被永久复用——BAND_SLOW 踢出席 → 拿不到新样本 → 永远翻不了身
+     *  （agnes/stepfun 实测探测 300~600ms，库里还挂着 10~14s 的旧值就是这么锁死的）。 */
+    private static final long RESTORED_MEDIAN_FRESH_MS = 3 * 3600_000L;
+    /** 分摊速度并列带的最小绝对余量（ms）：慢门槛取 max(最快×shareSpeedTieRatio, 最快+此值)。
+     *  纯按倍数会在"最快只要 300ms"时把 1s 的正常模型也踢出席——300ms 与 1s 是"相差不是很大"。 */
+    private static final long SHARE_TIE_MIN_SPREAD_MS = 3000;
     /** 首字"极慢"判定阈值（ms）：与 streamHeartbeatTimeoutMs 对齐。recentTtftWin 里该值以上的样本
      *  记为"极慢样本"，累积到阈值即踢出分摊抽签席——一次 230s 的尖峰不该被中位数稀释掉。 */
     private static final long VERY_SLOW_TTFT_MS = 30_000;
@@ -47,6 +58,9 @@ public class PolicyService {
     public static final String BAND_SLOW = "BAND_SLOW";                // 实测首字中位慢于阈值
     public static final String BAND_VERY_SLOW = "BAND_VERY_SLOW";      // 窗口内有反复极慢样本
     public static final String BAND_RATE_LIMIT = "BAND_RATE_LIMIT";    // 近窗口持续撞限流（本轮新增）
+    public static final String BAND_REL_SLOW = "BAND_REL_SLOW";        // 比本组最快候选慢出并列带（"相差很大"）
+    public static final String BAND_CHRONIC_LIMIT = "BAND_CHRONIC_LIMIT"; // 长期 429 比例高（读库，重启不丢）
+    public static final String BAND_PROVIDER_SEATS = "BAND_PROVIDER_SEATS"; // 一家占满 shareProviderSeatCap 席后，同家其它模型不再占席
     public static final String BAND_NO_SEAT = "BAND_NO_SEAT";          // 分数排在席外（席位数上限）
     private final ConcurrentHashMap<String, AtomicInteger> inflightEntry = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicInteger> inflightProvider = new ConcurrentHashMap<>();
@@ -137,10 +151,21 @@ public class PolicyService {
         }
     }
 
-    static String entryKey(String providerId, String model) { return providerId + "\n" + model; }
+    // 运行时键的模型段一律小写：同一个模型的大小写变体（配置改过一次名、上游真名带大写）实测会各留
+    // 一份健康记录——一份有熔断/一份没有、一份慢样本/一份快样本，抽签席看到的是"半个人"。
+    // 全项目其它地方（日志查询、评分覆盖查找、usage_daily）早已按大小写不敏感处理，这里补齐最后一处。
+    static String entryKey(String providerId, String model) {
+        return providerId + "\n" + (model == null ? "" : model.toLowerCase(java.util.Locale.ROOT));
+    }
     // \u0001 命名空间标记：usage 表同一 Map 里放 entry 与 channel 两类行，channel 行必须以标记开头，
     // 否则 tokensUsedProvider 按 "provider\nxxx" 汇总时会把 channel 行当模型行重复累加（实测 2 倍虚高）
     static String channelKey(String providerId, String channelId) { return providerId + "\n\u0001" + channelId; }
+    // 快照/界面只取标记后的真渠道号：直接写 ck[1] 会把标记一起落库，restore 时 channel() 再加一次
+    // 标记 → 每重启一次多一个 \u0001（实测 858 行脏快照、Key 级冷却跨重启全部失效）
+    static String rawChannelId(String keyPart) {
+        return keyPart != null && !keyPart.isEmpty() && keyPart.charAt(0) == '\u0001'
+                ? keyPart.substring(1) : keyPart;
+    }
 
     public static class EntryRuntime {
         public volatile double ewmaTtftMs = -1;    // -1 = 无样本
@@ -160,6 +185,11 @@ public class PolicyService {
         // 中位数抗尖峰：几条快样本就能把尖峰的痕迹挤出中位 → recentTtftMedian。-1=无中位数样本。
         public volatile double recentTtftMedian = -1;
         volatile boolean ttftSeeded;                      // 本进程是否已尝试从日志回填历史最近样本（只查一次库）
+        // 中位数最近一次"被真实样本算出来"的时刻（ms epoch）。跨重启恢复的中位数没有这个时间就会
+        // 永远是"上次的值"——模型今天 300ms、上周被塞了个 20s 样本，中位数赖着不走，BAND_SLOW 就永久饿死它。
+        volatile long medianTs;
+        // 配置/上游给的真实模型名（键已小写归一，界面仍显示原名，别让用户看见对不上的小写）
+        volatile String displayName;
         long[] recentTtftWin;                             // 最近 TTFT 环形窗（仅在 synchronized(er) 内读写）
         int recentTtftIdx = 0;
         int recentTtftCount = 0;
@@ -179,7 +209,9 @@ public class PolicyService {
     }
 
     public EntryRuntime entry(String providerId, String model) {
-        return entries.computeIfAbsent(entryKey(providerId, model), k -> new EntryRuntime());
+        EntryRuntime er = entries.computeIfAbsent(entryKey(providerId, model), k -> new EntryRuntime());
+        if (er.displayName == null) er.displayName = model;
+        return er;
     }
 
     public ChannelRuntime channel(String providerId, String channelId) {
@@ -265,6 +297,9 @@ public class PolicyService {
             out.loadShare = d.isLoadShare();
             out.bandSize = Math.max(2, d.getShareBandSize());
             out.slowTtftMs = d.getShareSlowTtftMs();
+            out.speedTieRatio = d.getShareSpeedTieRatio();
+            out.providerSeatCap = Math.max(0, d.getShareProviderSeatCap());
+            out.providerCapPct = d.getShareProviderCapPct();
         }
         // 策略级费用硬过滤：paid-only/free-only 把对侧档位在分类前整批剔除——usable/exhausted/
         // cooling 三个池都进不去，所以"全灭强放行"、"付费保底兜底"等任何路径都不可能把流量交给
@@ -387,11 +422,12 @@ public class PolicyService {
             }
         }
         // ---- 分摊抽签（auto/priority 策略、非 critical）：头部 bandSize 个模型（按模型去重不按 Key）
-        // 按 √(score/max) 概率抽主选。
+        // 按 √(偏好分/席内最大偏好分) 概率抽主选。偏好分=总分去掉速度因子（见 prefScore）。
         // 背景：赢家通吃——一家 EWMA 快的模型吸走全部流量（样本正反馈让它永远霸榜），
         // 高优先/高编码分的健康模型迟迟拿不到样本"挤不进门"，单家免费上游也被连发容易打爆。
-        // 开根号让权重曲线平缓：主选仍是最大概率，但健康邻位分到真实流量——
-        // 样本进来后快的分数升、份额自然涨回，慢的最近实测中位数过 shareSlowTtftMs 就不抽签（留在兜底顺序）。
+        // 口径分工（这是本轮的关键）：速度决定"能不能进席"（绝对慢门槛 + 与本组最快的并列带），
+        // 偏好决定"进席后接几成流量"（用户权重/优先级/费用档/吞吐/健康/限流）。
+        // 同席即视为"速度相差不是很大"，此时再按速度分份额就是对同一件事罚两遍，赢家照样拿走大半。
         // critical 不抽（任务要紧 strict 最佳）；latency/cost-first/weighted 不抽（速度/成本/权重语义各有主张）；
         // free-only 照抽——它就是 auto 语义限定在免费池内，分摊压力正是选它的理由；paid-only 不抽
         // （用户要的是"最快最稳最准的那一个"，不是分摊）。
@@ -400,6 +436,22 @@ public class PolicyService {
             List<Scored> band = new ArrayList<>();
             Set<String> seenModels = new HashSet<>();
             int bandCap = Math.max(2, d.getShareBandSize());
+            int seatCapPerProvider = Math.max(0, d.getShareProviderSeatCap());   // 0=一家不限席
+            Map<String, Integer> seatCount = new HashMap<>();
+            ConfigService.Snapshot bandSnap = configService.snapshot();
+            // 并列带参照系：本组"实测最快"的首字时间。取全部健康候选而不是前 N 个——按分数排在前面的
+            // 家未必是最快的（用户权重/优先级会把它顶上来），拿它当基准会把"其实大家都挺快"误判成"并列"。
+            double fastestMs = -1;
+            for (Scored s : usable) {
+                double v = measuredTtft(entry(s.candidate.providerId(), s.candidate.model()));
+                if (v >= 0 && (fastestMs < 0 || v < fastestMs)) fastestMs = v;
+            }
+            double tieSlowMs = fastestMs >= 0
+                    ? shareTieSlowThresholdMs(fastestMs, d.getShareSpeedTieRatio()) : -1;
+            if (out != null && tieSlowMs > 0) {
+                out.tieSlowMs = (long) tieSlowMs;   // 界面要说清"本次并列带画在哪、按哪个最快家画的"
+                out.fastestMs = (long) fastestMs;
+            }
             for (Scored s : usable) {
                 if (band.size() >= bandCap) break;
                 if (!seenModels.add(s.candidate.providerId() + "\n" + s.candidate.model())) {
@@ -413,6 +465,16 @@ public class PolicyService {
                 if (er.recentTtftMedian > d.getShareSlowTtftMs()) {
                     bandOut(rowOf, s, BAND_SLOW, "最近实测首字中位 " + (long) er.recentTtftMedian + "ms 慢于阈值 "
                             + d.getShareSlowTtftMs() + "ms，不占抽签席");
+                    continue;
+                }
+                // 相对慢（掉出并列带）不抽签：绝对阈值是"跨场景护栏"，判不了"这一组里谁明显落后"。
+                //  实测教训：门槛 13s 时，全组 300ms~1s 的快家里塞进一个 12s 的，它照样占席并分走
+                //  一成多流量——用户看得见"差 40 倍"，只看绝对值的规则看不见。
+                //  无实测（新模型）不参与、也不被拦：先给它一席才知道快慢。
+                double myTtft = measuredTtft(er);
+                if (tieSlowMs > 0 && myTtft > tieSlowMs) {
+                    bandOut(rowOf, s, BAND_REL_SLOW, "实测首字 " + (long) myTtft + "ms 比本组最快的 "
+                            + (long) fastestMs + "ms 慢出并列带（门槛 " + (long) tieSlowMs + "ms），不占抽签席");
                     continue;
                 }
                 // 极慢样本硬过滤：中位数会被一次 230s 尖峰稀释掉（环窗里其余都是快样本），
@@ -438,14 +500,50 @@ public class PolicyService {
                             + " 次/分），不占抽签席，仍留在兜底顺序");
                     continue;
                 }
+                // 慢性限流门槛（读库，重启不丢）：上面的密度判据是"爆发检测器"——两次 429 间隔 6 分钟
+                //  就归零，可这家其实整天都在撞墙（实测 sensenova 三天 106 发里 79 发 429）。
+                //  长窗口比例 + 样本量下限：偶发撞墙不误伤，长期撞墙的家即使本轮没撞也先让位。
+                double chronicRatio = rateLimiter.chronicLimitRatio(s.candidate.providerId());
+                long chronicN = rateLimiter.chronicSamples(s.candidate.providerId());
+                if (AdaptiveRateLimiter.seatBlockedByChronic(chronicRatio, chronicN,
+                        d.getChronicSeatBlockRatio(), d.getChronicRateMinSamples())) {
+                    bandOut(rowOf, s, BAND_CHRONIC_LIMIT, "近 " + d.getChronicRateWindowMinutes()
+                            + " 分钟真实流量里 " + Math.round(chronicRatio * 100) + "% 撞限流（" + chronicN
+                            + " 发样本），长期额度不足，不占抽签席，仍留在兜底顺序");
+                    continue;
+                }
+                // 供应商席位封顶（甲）：席位按模型去重，一家有多个高分模型时"按家累加"会成倍吃掉流量
+                //  （实测 lingxiongkeji 三个 priority 0 的模型占 3/10 席，供应商级实占 68%）。
+                //  超出上限的同家模型不占席，但仍留在兜底顺序里——撤的是抽签资格，不是候选。
+                if (seatCapPerProvider > 0
+                        && seatCount.getOrDefault(s.candidate.providerId(), 0) >= seatCapPerProvider) {
+                    bandOut(rowOf, s, BAND_PROVIDER_SEATS, "该家已有 " + seatCount.get(s.candidate.providerId())
+                            + " 个模型占席，每家最多 " + seatCapPerProvider + " 席（shareProviderSeatCap），"
+                            + "本模型不占抽签席，仍留在兜底顺序");
+                    continue;
+                }
+                seatCount.merge(s.candidate.providerId(), 1, Integer::sum);
                 band.add(s);
             }
             if (band.size() > 1) {
-                double max = Math.max(band.get(0).score, 1e-9);
+                // 份额口径：√(偏好分/席内最大偏好分) 归一，偏好分=总分去掉两个速度因子（见 prefScore），
+                // 再按供应商份额上限回灌（见 providerCappedShares）。
+                // 席位归属看速度（绝对门槛 + 并列带 + 同家席位封顶），份额多少看偏好（用户权重/优先级/费用档/健康/限流）——
+                // 原先按 √(总分) 分，席内 300ms 与 1.5s 的速度差会再被放大成份额差，
+                // "相差不大就该分摊"变成"最快的 still 拿走一半"。
                 double[] w = new double[band.size()];
+                String[] bandProviders = new String[band.size()];
+                double max = 1e-9;
+                for (int i = 0; i < band.size(); i++) {
+                    w[i] = prefScore(bandSnap, band.get(i));
+                    bandProviders[i] = band.get(i).candidate.providerId();
+                    max = Math.max(max, w[i]);
+                }
+                for (int i = 0; i < band.size(); i++) w[i] = Math.sqrt(Math.max(0.0, w[i]) / max);
+                double[] share = providerCappedShares(w, bandProviders, d.getShareProviderCapPct());
                 double totW = 0;
                 for (int i = 0; i < band.size(); i++) {
-                    w[i] = Math.sqrt(Math.max(0.0, band.get(i).score) / max);
+                    w[i] = share[i];
                     totW += w[i];
                 }
                 if (out != null) {
@@ -642,6 +740,114 @@ public class PolicyService {
         return java.util.concurrent.ThreadLocalRandom.current().nextDouble() * max;
     }
 
+    /** 该条目的"实测首字速度"（ms），无有效样本返回 -1。
+     *  优先最近中位数（抗尖峰），退回 EWMA；低于 TTFT_ARTIFACT_FLOOR_MS 的不是速度而是计量伪值——
+     *  旧口径（修复前）塞进快照的 EWMA≈2ms 若被当真，S 能到 500，把一家伪装成"比光速还快"。 */
+    static double measuredTtft(EntryRuntime er) {
+        double v = er.recentTtftMedian >= 0 ? er.recentTtftMedian : er.ewmaTtftMs;
+        return v >= TTFT_ARTIFACT_FLOOR_MS ? v : -1;
+    }
+
+    /** S 因子：实测首字的归一化倒数（200ms 即满分 5.0）。
+     *  无实测按费用档给保守默认——未知不得比真实样本更乐观：免费 0.9（鼓励先试）/付费 0.5。 */
+    static double speedFactor(String tier, double ttftEst) {
+        if (ttftEst < 0) return "free".equalsIgnoreCase(tier) ? 0.9 : 0.5;
+        return 1000.0 / Math.max(200.0, ttftEst);
+    }
+
+    /** 分摊速度并列带的慢门槛：实测首字超过它就不占席（"相差很大"，让位给快家）。
+     *  倍率与绝对差取宽松的一侧：纯按倍率会在"最快只要 300ms"时把 1s 的正常模型也踢出（300ms 与 1s
+     *  是"相差不是很大"），纯按绝对差则会让 20s 与 17s 并列。取 max 后两者都要"明显落后"才出局。 */
+    static double shareTieSlowThresholdMs(double fastestMs, double tieRatio) {
+        return Math.max(fastestMs * Math.max(1.0, tieRatio), fastestMs + SHARE_TIE_MIN_SPREAD_MS);
+    }
+
+    /** 吞吐因子＝出字速度：地板 0.4，每 80 tok/s 加 1.0（48 tok/s 才是中性 1.0），≈168 tok/s 起封顶 2.5；
+     *  既要首字快（S）也要出活快（T）。
+     *  无样本与 S 同哲学：免费 0.9 / 其余 0.5，防"无历史包袱"的付费模型凭默认分反超。
+     *  抽成纯函数是因为份额口径要把同一个值除回去（见 prefScore），两处必须一致——
+     *  否则"分数里扣过、份额里没扣"，用户要求的"速度差不大就该分摊"只兑现了一半。 */
+    static double throughputFactor(String tier, double ewmaTokensPerSec) {
+        if (ewmaTokensPerSec < 0) return "free".equals(tier) ? 0.9 : 0.5;
+        return Math.min(2.5, Math.max(0.4, 0.4 + ewmaTokensPerSec / 80.0));
+    }
+
+    /** 分摊份额用的"偏好分"= 总分 ÷（首字因子 × 出字因子），把速度这一维整体除回去。
+     *  为什么份额不看速度而席位看：能同席的候选已经过并列带门槛（首字彼此相差 ≤ shareSpeedTieRatio 倍，
+     *  属"相差不是很大"），再按速度分份额就等于对同一件事罚两遍，赢家仍会拿走大半流量。
+     *  除掉的是 S 和 T 两个速度因子（用户说的"响应速度"包含出字快慢）；
+     *  继续说话的只有：优先级 P、用户权重 U、费用档 C、健康 H、质量 Q、代码分 CS、限流 R/L。 */
+    private double prefScore(ConfigService.Snapshot snap, Scored s) {
+        String pid = s.candidate.providerId();
+        String model = s.candidate.model();
+        EntryRuntime er = entry(pid, model);
+        String tier = snap.effectiveCostTier(pid, model);
+        double sf = speedFactor(tier, measuredTtft(er)) * throughputFactor(tier, er.ewmaTokensPerSec);
+        return s.score / Math.max(sf, 1e-9);
+    }
+
+    /** 供应商级份额封顶（乙）：把席内权重归一为份额后，任何一家的合计不超过 capPct，
+     *  超出部分按权重比例回灌给尚未达线的家。
+     *  为什么需要它：席位按模型去重，一家即使只占 1 席，其偏好分也可能远高于别家；
+     *  而"分摊到各个供应商"这句话的单位是供应商，不是模型——封顶线必须画在供应商这一层。
+     *  capPct ≤ 0 或 ≥ 1＝不限；低于"每家均分（1/家数）"时取均分线：再低就不可能既封顶又把 100% 分完。
+     *  算法＝逐家钉线：找出当前份额最大且仍超线的一家，把它钉在 cap 上，余量按权重分给其余家，
+     *  重复到没有家超线（最多"家数"轮，每轮至少钉一家）。
+     *  不用"每轮把所有超线者一起压回线再回灌"的写法：那会让上一轮已钉线的家被下一轮的回灌顶过线，
+     *  来回震荡、结果取决于轮数（份额是长期流量分配，不能靠迭代次数定）。 */
+    static double[] providerCappedShares(double[] weights, String[] providers, double capPct) {
+        int n = weights.length;
+        double[] sh = new double[n];
+        if (n == 0) return sh;
+        double tot = 0;
+        for (double v : weights) tot += Math.max(0, v);
+        if (tot <= 1e-12) {          // 全零权重（极端：偏好分全被压到 0）：均分，抽签仍能铺开
+            for (int i = 0; i < n; i++) sh[i] = 1.0 / n;
+            return sh;
+        }
+        for (int i = 0; i < n; i++) sh[i] = Math.max(0, weights[i]) / tot;
+        Set<String> uniq = new HashSet<>(Arrays.asList(providers));
+        if (capPct <= 0 || capPct >= 1 || uniq.size() < 2) return sh;   // 只有一家时封顶无意义：它必须接住 100%
+        double cap = Math.max(capPct, 1.0 / uniq.size());
+        Map<String, Double> wAgg = new HashMap<>();
+        for (int i = 0; i < n; i++) wAgg.merge(providers[i], Math.max(0, weights[i]), Double::sum);
+        Set<String> capped = new HashSet<>();
+        for (int round = 0; round < uniq.size(); round++) {
+            double tail = 1 - cap * capped.size();
+            double wTail = tailWeight(wAgg, capped);
+            if (tail <= 1e-12 || wTail <= 1e-12) break;
+            String top = null;
+            double topShare = -1;
+            for (Map.Entry<String, Double> e : wAgg.entrySet()) {
+                if (capped.contains(e.getKey())) continue;
+                double s = tail * e.getValue() / wTail;
+                if (s > topShare) { topShare = s; top = e.getKey(); }
+            }
+            if (top == null || topShare <= cap + 1e-9) break;   // 没有家超线 → 已收敛
+            capped.add(top);
+        }
+        double tail = 1 - cap * capped.size();
+        double wTail = tailWeight(wAgg, capped);
+        for (int i = 0; i < n; i++) {
+            String p = providers[i];
+            if (capped.contains(p)) {
+                double agg = wAgg.get(p);
+                sh[i] = agg > 1e-12 ? cap * Math.max(0, weights[i]) / agg : 0;   // 一家内部按权重分席
+            } else {
+                sh[i] = wTail > 1e-12 ? tail * Math.max(0, weights[i]) / wTail : 0;
+            }
+        }
+        return sh;
+    }
+
+    private static double tailWeight(Map<String, Double> wAgg, Set<String> capped) {
+        double w = 0;
+        for (Map.Entry<String, Double> e : wAgg.entrySet()) {
+            if (!capped.contains(e.getKey())) w += e.getValue();
+        }
+        return w;
+    }
+
     /** Score = P(优先级) × H(健康) × S(首字速度) × T(吞吐) × C(费用) × K(语义类别匹配) × TW(工具弱)
      *  @param f 非空时把每个因子的实际取值写进去，供"评分与分摊"界面解释这一分是怎么来的（热路径传 null，零开销） */
     private double score(Candidate c, String strategy, boolean critical, GatewayConfig.Defaults d,
@@ -681,29 +887,11 @@ public class PolicyService {
         //  拿乐观 0.9 → 反超。无样本 = 未知，不能比真实样本更乐观：免费 0.9（鼓励先试）
         //  但付费 0.5（未知速度的付费模型绝不排到有真实样本的免费模型前面）
         ensureRecentTtft(er, c.providerId, c.model);
-        double s;
-        double ttftEst = er.recentTtftMedian >= 0 ? er.recentTtftMedian : er.ewmaTtftMs;
-        if (ttftEst < 0) {
-            s = switch (tier) {
-                case "free" -> 0.9;
-                default -> 0.5;
-            };
-        } else {
-            s = 1000.0 / Math.max(200.0, ttftEst);  // 200ms TTFT 即速度满分 5.0
-        }
+        double ttftEst = measuredTtft(er);
+        double s = speedFactor(tier, ttftEst);
 
-        // T: 吞吐系数——出 token 速率 EWMA（长回复场景快模型胜出）。
-        // 无样本与 S 同哲学：免费 0.9 / 其余 0.5，防"无历史包袱"的付费模型凭默认分反超
-        double t;
-        if (er.ewmaTokensPerSec < 0) {
-            t = switch (tier) {
-                case "free" -> 0.9;
-                default -> 0.5;
-            };
-        } else {
-            // 20 tok/s 起步给 1.0，200 tok/s 满分 2.5：既要首字快（S）也要出活快（T）
-            t = Math.min(2.5, Math.max(0.4, 0.4 + er.ewmaTokensPerSec / 80.0));
-        }
+        // T: 吞吐系数——出 token 速率 EWMA（长回复场景快模型胜出）。纯函数见 throughputFactor
+        double t = throughputFactor(tier, er.ewmaTokensPerSec);
 
         // C: 费用系数——cost-first 下权重↑；free=1.0 递减到 premium=0.1。
         // paid-only 豁免（同 critical）：档位已保证全付费，再按贵贱打分违背"只图快稳准不差钱"的语义
@@ -772,6 +960,11 @@ public class PolicyService {
             double pressure = rateLimiter.ratePressure(c.providerId(), c.model(), c.channelId());
             double density = rateLimiter.channelLimitDensity(c.providerId(), c.channelId());
             limP = AdaptiveRateLimiter.pressureFactor(pressure, density);
+            //  第三层=慢性（读库长窗口 429 占比）：压力/密度都是爆发检测器，隔几分钟就"失忆"，
+            //  重启更是一片空白。实测某家三天 106 发里 79 发 429，两次撞墙相差 6 分钟时密度=0、
+            //  L=1.0，抽签照旧给它四成流量——长期撞墙的家必须持续便宜一块，直到比例自己降下来。
+            limP = Math.min(limP, rateLimiter.chronicPenalty(c.providerId(),
+                    d.getChronicRateMinSamples(), d.getChronicSeatBlockRatio()));
         }
 
         // TW: 工具能力弱因子——带 tools 定义的请求（Agent 工具发起）打到 toolWeak 模型上，
@@ -813,6 +1006,8 @@ public class PolicyService {
             // 诊断附值（不连乘）：让界面能直接回答"L 为什么不是 1"——撞墙次数与学到的额度都摊开给看
             f.put("rateLimits5m", (double) rateLimiter.providerRateLimits(c.providerId()));
             f.put("learnedReqPerMin", (double) rateLimiter.tightestReqCeiling(c.providerId()));
+            f.put("chronicLimitRatio", rateLimiter.chronicLimitRatio(c.providerId()));
+            f.put("chronicSamples", (double) rateLimiter.chronicSamples(c.providerId()));
             f.put("priority", (double) priority);
             f.put("consecutiveFailures", (double) er.consecutiveFailures);
             f.put("qualityIssues", (double) er.qualityIssues);
@@ -910,6 +1105,7 @@ public class PolicyService {
         java.util.Arrays.sort(cp);
         er.recentTtftMedian = cp.length % 2 == 1
                 ? cp[cp.length / 2] : (cp[cp.length / 2 - 1] + cp[cp.length / 2]) / 2.0;
+        er.medianTs = System.currentTimeMillis();
     }
 
     /** 统计窗口内"极慢样本"数（TTFT ≥ VERY_SLOW_TTFT_MS）。调用方持 synchronized(er)。 */
@@ -926,9 +1122,14 @@ public class PolicyService {
      *  EWMA 一旦带上尖峰样本会把慢判钉死很久——若只用 EWMA 当判据，偶尔抽风的快模型
      *  重启后永远回不了分摊抽签席（没份额→没样本→永远"慢"）。日志里有真相，直接拿来补窗。 */
     private void ensureRecentTtft(EntryRuntime er, String providerId, String model) {
-        if (er.ttftSeeded || er.recentTtftCount > 0 || er.recentTtftMedian >= 0) return;
+        if (er.ttftSeeded || er.recentTtftCount > 0) return;
+        // 只有一种中位数可以挡住回填：本进程内还算新鲜的"上次真实值"。跨重启恢复的旧中位数
+        // 不再自我免疫——否则上周一次抽风能把模型永久钉在 BAND_SLOW 外（没席位→没流量→没新样本）。
+        if (er.recentTtftMedian >= 0
+                && System.currentTimeMillis() - er.medianTs < RESTORED_MEDIAN_FRESH_MS) return;
         er.ttftSeeded = true;
-        List<Long> hist = dao.recentOkTtfts(providerId, model, 8, LARGE_CONTEXT_TOKENS);   // 新→旧
+        List<Long> hist = dao.recentOkTtfts(providerId, model, 8, LARGE_CONTEXT_TOKENS,
+                TTFT_ARTIFACT_FLOOR_MS);   // 新→旧
         if (hist.isEmpty()) return;
         synchronized (er) {
             if (er.recentTtftCount > 0) return;          // 实时样本先到：不画蛇添足
@@ -960,7 +1161,10 @@ public class PolicyService {
                 // 大上下文（输入>10K token）的 TTFT 不进 EWMA：首字慢主要是预填充/排队开销，
                 // 不代表常规请求速度，混入会把快模型永久压出候选（吞吐样本照记——出活速度是真实能力）
                 // ttftMs=null（非流式无首字样本）跳过速度样本：旧调用方注入合成 500ms 把慢候选洗白成中速
-                if (ttftMs != null && (tokensIn == null || tokensIn <= LARGE_CONTEXT_TOKENS)) {
+                // TTFT < TTFT_ARTIFACT_FLOOR_MS 的不是速度而是计量口径 bug（真网络没有 50ms 内的首字），
+                // 让它进窗会把模型伪装成"极快"并抢走份额——实测曾有 SSE 流量记成 0~3ms。
+                if (ttftMs != null && ttftMs >= TTFT_ARTIFACT_FLOOR_MS
+                        && (tokensIn == null || tokensIn <= LARGE_CONTEXT_TOKENS)) {
                     er.ewmaTtftMs = er.ewmaTtftMs < 0 ? ttftMs : alpha * ttftMs + (1 - alpha) * er.ewmaTtftMs;
                     // 同时进最近样本环形窗：中位数=抗尖峰的"典型首字速度"（分摊抽签门槛用它）
                     if (er.recentTtftWin == null) er.recentTtftWin = new long[8];
@@ -1350,7 +1554,7 @@ public class PolicyService {
             EntryRuntime er = e.getValue();
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("provider", pk[0]);
-            row.put("model", pk[1]);
+            row.put("model", er.displayName != null ? er.displayName : pk[1]);
             row.put("ewmaTtftMs", er.ewmaTtftMs < 0 ? null : Math.round(er.ewmaTtftMs));
             row.put("recentTtftMedian", er.recentTtftMedian < 0 ? null : Math.round(er.recentTtftMedian));
             row.put("ewmaTokensPerSec", er.ewmaTokensPerSec < 0 ? null : Math.round(er.ewmaTokensPerSec * 10) / 10.0);
@@ -1368,7 +1572,7 @@ public class PolicyService {
             String[] ck = e.getKey().split("\n", 2);
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("provider", ck[0]);
-            row.put("channel", ck[1]);
+            row.put("channel", rawChannelId(ck[1]));
             row.put("state", e.getValue().coolDownUntil > now ? "COOLING" : "AVAILABLE");
             row.put("coolDownUntil", e.getValue().coolDownUntil);
             row.put("lastRateLimitedAt", e.getValue().lastRateLimitedAt);
@@ -1392,9 +1596,22 @@ public class PolicyService {
         return out;
     }
 
+    /** 慢性限流刷新（随 60s 快照调度）：把请求日志里"这一家长期撞墙"的事实喂给限流学习器。
+     *  内存侧的压力/密度只记得最近这波，且重启即清零——不读库，刚重启的网关就会把天天撞墙的家
+     *  当清白之身重新推上抽签席（实测重启当天 sensenova 又连吃两发 429）。窗口≤0 = 关闭该层。 */
+    public void refreshChronicRateLimits() {
+        GatewayConfig.Defaults d = configService.snapshot().config.getDefaults();
+        int minutes = d.getChronicRateWindowMinutes();
+        if (minutes <= 0) {
+            rateLimiter.setChronicStats(null, 0);
+            return;
+        }
+        long now = System.currentTimeMillis();
+        rateLimiter.setChronicStats(dao.chronicRateLimits(now - minutes * 60_000L), now);
+    }
+
     /** 定期快照（60s 一次，重启恢复用） */
-    public void persistSnapshot() {
-        List<StatsDao.SnapshotRow> rows = new ArrayList<>();
+    public void persistSnapshot() {        List<StatsDao.SnapshotRow> rows = new ArrayList<>();
         long now = System.currentTimeMillis();
         for (Map.Entry<String, EntryRuntime> e : entries.entrySet()) {
             String[] pk = e.getKey().split("\n", 2);
@@ -1409,7 +1626,7 @@ public class PolicyService {
         for (Map.Entry<String, ChannelRuntime> e : channels.entrySet()) {
             String[] ck = e.getKey().split("\n", 2);
             ChannelRuntime cr = e.getValue();
-            rows.add(new StatsDao.SnapshotRow(ck[0], ck[1], "*", null,
+            rows.add(new StatsDao.SnapshotRow(ck[0], rawChannelId(ck[1]), "*", null,
                     cr.coolDownUntil > now ? "COOLING" : "AVAILABLE",
                     cr.coolDownUntil, 0, null, null));
         }
@@ -1418,12 +1635,20 @@ public class PolicyService {
 
     /** 启动恢复运行时快照 */
     public void restoreRuntime() {
+        int junk = dao.cleanupRuntimeSnapshotJunk();
+        if (junk > 0) log.info("清理历史脏运行时快照 {} 行（渠道标记逐次累积 / 模型名大小写分裂）", junk);
         for (StatsDao.SnapshotRow r : dao.loadRuntimeSnapshots()) {
             if ("*".equals(r.channelId())) {
                 EntryRuntime er = entry(r.providerId(), r.model());
+                er.displayName = null;          // 快照里的模型名是归一后的小写，原名等首个真实流量来盖章
                 if (r.ewmaTtftMs() != null) er.ewmaTtftMs = r.ewmaTtftMs();
                 if (r.ewmaTokensPerSec() != null) er.ewmaTokensPerSec = r.ewmaTokensPerSec();
-                if (r.recentTtftMedian() != null) er.recentTtftMedian = r.recentTtftMedian();
+                if (r.recentTtftMedian() != null) {
+                    er.recentTtftMedian = r.recentTtftMedian();
+                    // 带上"这条中位数是什么时候算出来的"：恢复值不再自称最新实测，
+                    // 过了保鲜期就由 ensureRecentTtft 用请求日志重算（否则上周一次抽风永久锁死抽签席）
+                    er.medianTs = r.updatedAt() == null ? 0 : r.updatedAt();
+                }
                 if (r.coolDownUntil() != null && r.coolDownUntil() > System.currentTimeMillis()) {
                     er.coolDownUntil = r.coolDownUntil();
                     er.consecutiveFailures = r.consecutiveFailures() == null ? 0 : r.consecutiveFailures();
@@ -1515,6 +1740,13 @@ public class PolicyService {
         public boolean loadShare;
         public int bandSize;
         public long slowTtftMs;
+        // 并列带（速度只决定席位）：配置倍率 + 本次实测最快家 + 由它算出的门槛（0=本次没有参照系）
+        public double speedTieRatio;
+        public long tieSlowMs;
+        public long fastestMs;
+        /** 供应商级封顶：甲＝一家最多占几席（0=不限），乙＝一家应得份额上限（0=不限）。界面要说清本次按什么线画的 */
+        public int providerSeatCap;
+        public double providerCapPct;
         /** true = 管理台"评分沙盘"主动重放，不代表真实发生的一次调用 */
         public boolean preview;
         public final List<Row> rows = new ArrayList<>();
@@ -1551,6 +1783,11 @@ public class PolicyService {
             m.put("loadShare", loadShare);
             m.put("bandSize", bandSize);
             m.put("slowTtftMs", slowTtftMs);
+            m.put("speedTieRatio", speedTieRatio);
+            m.put("tieSlowMs", tieSlowMs);
+            m.put("fastestMs", fastestMs);
+            if (providerSeatCap > 0) m.put("providerSeatCap", providerSeatCap);
+            if (providerCapPct > 0) m.put("providerCapPct", providerCapPct);
             m.put("preview", preview);
             m.put("pickedProvider", pickedProvider);
             m.put("pickedModel", pickedModel);
@@ -1582,6 +1819,11 @@ public class PolicyService {
             t.loadShare = Boolean.TRUE.equals(m.get("loadShare"));
             t.bandSize = (int) num(m.get("bandSize"), 0);
             t.slowTtftMs = (long) num(m.get("slowTtftMs"), 0);
+            t.speedTieRatio = num(m.get("speedTieRatio"), 0);
+            t.tieSlowMs = (long) num(m.get("tieSlowMs"), 0);
+            t.fastestMs = (long) num(m.get("fastestMs"), 0);
+            t.providerSeatCap = (int) num(m.get("providerSeatCap"), 0);
+            t.providerCapPct = num(m.get("providerCapPct"), 0);
             t.preview = Boolean.TRUE.equals(m.get("preview"));
             t.pickedProvider = str(m.get("pickedProvider"));
             t.pickedModel = str(m.get("pickedModel"));

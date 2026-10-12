@@ -951,8 +951,8 @@ public class AdminController {
         return Map.of("ok", true, "catalogSize", catalogService.fullCatalog().size());
     }
 
-    /** 速带分摊抽签（loadShare）：开关 + 抽签带宽 + 慢门槛，界面可改、落盘持久、实时生效
-     *  （rank() 每次读快照 defaults，persist 换快照后下一请求即用新值）。 */
+    /** 速带分摊抽签（loadShare）：开关 + 抽签带宽 + 慢门槛 + 速度并列带倍率 + 慢性限流三参数，
+     *  界面可改、落盘持久、实时生效（rank() 每次读快照 defaults，persist 换快照后下一请求即用新值）。 */
     @GetMapping("/load-share")
     public Map<String, Object> getLoadShare() {
         GatewayConfig.Defaults d = configService.snapshot().config.getDefaults();
@@ -960,6 +960,12 @@ public class AdminController {
         out.put("enabled", d.isLoadShare());
         out.put("bandSize", d.getShareBandSize());
         out.put("slowTtftMs", d.getShareSlowTtftMs());
+        out.put("speedTieRatio", d.getShareSpeedTieRatio());
+        out.put("providerSeatCap", d.getShareProviderSeatCap());
+        out.put("providerCapPct", d.getShareProviderCapPct());
+        out.put("chronicWindowMinutes", d.getChronicRateWindowMinutes());
+        out.put("chronicMinSamples", d.getChronicRateMinSamples());
+        out.put("chronicSeatBlockRatio", d.getChronicSeatBlockRatio());
         // 实测 TTFT 统计 + 推荐慢门槛（界面展示，改不改由用户点按钮决定，不自动落盘）
         out.put("ttft", policyService.ttftStats());
         return out;
@@ -970,19 +976,51 @@ public class AdminController {
         Boolean en = body.containsKey("enabled") ? boolOr(body.get("enabled"), false) : null;
         Integer band = intOrNull(body.get("bandSize"));
         Integer slow = intOrNull(body.get("slowTtftMs"));
+        Double tie = doubleOrNull(body.get("speedTieRatio"));
+        Integer seatCap = intOrNull(body.get("providerSeatCap"));
+        Double capPct = doubleOrNull(body.get("providerCapPct"));
+        Integer cWin = intOrNull(body.get("chronicWindowMinutes"));
+        Integer cMin = intOrNull(body.get("chronicMinSamples"));
+        Double cRatio = doubleOrNull(body.get("chronicSeatBlockRatio"));
         if (band != null && (band < 2 || band > 10)) return bad("bandSize 需在 2~10");
         if (slow != null && (slow < 1000 || slow > 60000)) return bad("slowTtftMs 需在 1000~60000");
-        if (en == null && band == null && slow == null) return bad("enabled/bandSize/slowTtftMs 至少给一个");
+        if (tie != null && (tie < 1.0 || tie > 20.0)) return bad("speedTieRatio 需在 1.0~20.0（1=速度一有差就分份额）");
+        if (seatCap != null && (seatCap < 0 || seatCap > 10)) return bad("providerSeatCap 需在 0~10（0=一家不限席）");
+        // 0 是"关闭封顶"的显式动作，必须能存住，所以单独放行；非 0 时低于 10% 无意义（一家连一成都接不住）
+        if (capPct != null && !(capPct == 0 || (capPct >= 0.1 && capPct <= 1.0)))
+            return bad("providerCapPct 需为 0（不限）或 0.1~1.0");
+        if (cWin != null && (cWin < 0 || cWin > 1440)) return bad("chronicWindowMinutes 需在 0~1440（0=关闭慢性限流层）");
+        if (cMin != null && (cMin < 3 || cMin > 100)) return bad("chronicMinSamples 需在 3~100");
+        if (cRatio != null && (cRatio < 0.05 || cRatio > 1.0)) return bad("chronicSeatBlockRatio 需在 0.05~1.0");
+        if (en == null && band == null && slow == null && tie == null && seatCap == null && capPct == null
+                && cWin == null && cMin == null && cRatio == null)
+            return bad("enabled/bandSize/slowTtftMs/speedTieRatio/providerSeatCap/providerCapPct/慢性限流参数 至少给一个");
         try {
             configService.persist(cfg -> {
                 GatewayConfig.Defaults d = cfg.getDefaults();
                 if (en != null) d.setLoadShare(en);
                 if (band != null) d.setShareBandSize(band);
                 if (slow != null) d.setShareSlowTtftMs(slow);
+                if (tie != null) d.setShareSpeedTieRatio(tie);
+                if (seatCap != null) d.setShareProviderSeatCap(seatCap);
+                if (capPct != null) d.setShareProviderCapPct(capPct);
+                if (cWin != null) d.setChronicRateWindowMinutes(cWin);
+                if (cMin != null) d.setChronicRateMinSamples(cMin);
+                if (cRatio != null) d.setChronicSeatBlockRatio(cRatio);
             });
             GatewayConfig.Defaults nd = configService.snapshot().config.getDefaults();
-            return ResponseEntity.ok(Map.of("ok", true, "enabled", nd.isLoadShare(),
-                    "bandSize", nd.getShareBandSize(), "slowTtftMs", nd.getShareSlowTtftMs()));
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            out.put("ok", true);
+            out.put("enabled", nd.isLoadShare());
+            out.put("bandSize", nd.getShareBandSize());
+            out.put("slowTtftMs", nd.getShareSlowTtftMs());
+            out.put("speedTieRatio", nd.getShareSpeedTieRatio());
+            out.put("providerSeatCap", nd.getShareProviderSeatCap());
+            out.put("providerCapPct", nd.getShareProviderCapPct());
+            out.put("chronicWindowMinutes", nd.getChronicRateWindowMinutes());
+            out.put("chronicMinSamples", nd.getChronicRateMinSamples());
+            out.put("chronicSeatBlockRatio", nd.getChronicSeatBlockRatio());
+            return ResponseEntity.ok(out);
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(Map.of("error", String.valueOf(e.getMessage())));
         }
@@ -1128,7 +1166,21 @@ public class AdminController {
         out.put("totalRequests", total);
         out.put("rows", rows);
         out.put("neverCalled", neverCalled);
-        out.put("shareScope", "应得侧＝抽签席 √(分数) 权重的窗口均值，来自采样库＋内存环形去重合并");
+        // 供应商级的"应得"：必须由服务端按决策汇总，不能让界面把模型级均值相加——
+        // 模型级均值各自只看"自己进席的那几次"，同家三个模型加总能加出 169% 这种不可能的数。
+        Map<String, Object> provExpected = new LinkedHashMap<>();
+        obs.providerShare().forEach((p, v) -> provExpected.put(p, round1(v * 100)));
+        out.put("providerExpected", provExpected);
+        // 本窗口"实际生效"的单家线：封顶取 max(配置值, 1÷该决策占席家数)，占席家数少时比配置值宽松。
+        // 界面判"谁超线"要用它，否则两家分席时会把合法的 50% 标成超过 35% 的红字。null=窗口内没有带封顶的决策。
+        out.put("providerCapPctEffective", obs.providerCapPctEffective());
+        out.put("shareScope", "应得侧＝抽签席 √(偏好分) 权重（偏好分=综合分÷两个速度因子，速度只挡席位不分份额），"
+                + "再按供应商封顶回灌；均值分母＝本窗口" + obs.seatedDecisions() + " 次\"有席\"的决策"
+                + "（模型级与供应商级同一分母，所以各家应得加起来＝100%），来自采样库＋内存环形去重合并");
+        // 封顶参数回显：界面要能在"供应商汇总"那一层直接标出超线的家，而不是让人去系统页翻设置
+        GatewayConfig.Defaults lsd = snap.config.getDefaults();
+        out.put("providerSeatCap", Math.max(0, lsd.getShareProviderSeatCap()));
+        out.put("providerCapPct", lsd.getShareProviderCapPct());
         out.put("observedShareModels", expected.size());
         out.put("shareSamples", obs.samples());
         out.put("shareSamplesFromDb", obs.fromDb());

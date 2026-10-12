@@ -23,6 +23,7 @@ public class Startup {
         return args -> {
             configService.init();
             policyService.restoreRuntime();
+            policyService.refreshChronicRateLimits();   // 冷启动第一发就认出长期撞墙的家，不等 60s 调度
             catalogService.start();
             log.info("LLM Gateway 启动完成: http://{}:{}  (管理页 /ui)",
                     configService.snapshot().config.getServer().getBind(),

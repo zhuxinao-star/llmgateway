@@ -72,6 +72,14 @@ public final class ConfigWriter {
         y.append("  loadShare: ").append(d.isLoadShare()).append('\n');
         y.append("  shareBandSize: ").append(d.getShareBandSize()).append('\n');
         y.append("  shareSlowTtftMs: ").append(d.getShareSlowTtftMs()).append('\n');
+        y.append("  shareSpeedTieRatio: ").append(d.getShareSpeedTieRatio()).append('\n');
+        // 供应商级封顶（甲席位/乙份额）：0＝不限本身是有意的动作，必须存得住，所以恒写
+        y.append("  shareProviderSeatCap: ").append(d.getShareProviderSeatCap()).append('\n');
+        y.append("  shareProviderCapPct: ").append(d.getShareProviderCapPct()).append('\n');
+        // 慢性限流（读库长窗口 429 占比）：窗口=0 即关闭该层，仍照写——关掉这个动作本身要存得住
+        y.append("  chronicRateWindowMinutes: ").append(d.getChronicRateWindowMinutes()).append('\n');
+        y.append("  chronicRateMinSamples: ").append(d.getChronicRateMinSamples()).append('\n');
+        y.append("  chronicSeatBlockRatio: ").append(d.getChronicSeatBlockRatio()).append('\n');
         // catalogDiscovery 默认 false，仅在开启时写（避免污染默认配置；false 是安全默认）
         if (d.isCatalogDiscovery()) y.append("  catalogDiscovery: true\n");
         // 模型自动停用/恢复：默认关，仅在开启或调参时写（false 是安全默认，不污染配置）

@@ -112,6 +112,7 @@ public class StatsService {
         while (true) {
             try {
                 Thread.sleep(60_000);
+                policyService.refreshChronicRateLimits();   // 慢性限流读库刷新（重启后第一发就能认出长期撞墙的家）
                 policyService.persistSnapshot();
             } catch (InterruptedException e) {
                 return;

@@ -264,14 +264,43 @@
       <button class="btn" onclick="setStrategy(this)">保存并生效</button>
     </div>
     <div class="toolbar" style="margin-top:10px;padding-top:8px;border-top:1px dashed rgba(128,128,128,.35)">
-      <span class="dim" style="font-size:12px">速带分摊（auto/priority/free-only 生效）：从分数最高的一小"速带"里加权抽签，速度相近时把流量摊给多家，避免独刷一家撞限流</span>
+      <span class="dim" style="font-size:12px">速带分摊（auto/priority/free-only 生效）：<b style="color:#cfe3ff">速度只决定"能不能进席"</b>（绝对慢阈值 + 与本组最快的并列带），<b style="color:#cfe3ff">进席后的份额按偏好分</b>（人工权重/优先级/费用档/健康/限流——两个速度因子都已从份额里除掉），再过一道供应商封顶</span>
+    </div>
+    <div class="toolbar" style="margin-top:6px">
       <button class="btn ghost" id="lsBtn" onclick="toggleLoadShare(this)">读取中</button>
-      <span class="dim" style="font-size:12px">带宽</span>
-      <input id="lsBand" type="number" min="2" max="10" style="width:60px">
-      <span class="dim" style="font-size:12px">慢阈值ms(≥1000)</span>
-      <input id="lsSlow" type="number" min="1000" max="60000" step="500" style="width:80px">
+      <span class="dim" style="font-size:12px">带宽(席)</span>
+      <input id="lsBand" type="number" min="2" max="10" style="width:64px" oninput="lsCapHint()">
+      <span class="dim" style="font-size:12px" title="实测首字中位超过它就完全不进抽签席">绝对慢阈值ms</span>
+      <input id="lsSlow" type="number" min="1000" max="60000" step="500" style="width:86px">
+      <span class="dim" style="font-size:12px" title="比本组最快慢过「最快×此倍」且慢过 3 秒的模型不占抽签席（取宽松一侧，亚秒级差异都算并列）">并列带倍率</span>
+      <input id="lsTie" type="number" min="1" max="20" step="0.5" style="width:64px">
       <button class="btn mini ghost" onclick="saveLoadShareParams(this)">保存参数</button>
       <span id="lsHint" class="dim" style="font-size:12px"></span>
+    </div>
+    <div class="toolbar" style="margin-top:6px">
+      <span class="dim" style="font-size:12px">慢性限流（读请求日志长窗口，重启不丢）：</span>
+      <span class="dim" style="font-size:12px" title="按真实流量统计每家的 429 占比；0=关闭这一层">窗口分钟</span>
+      <input id="lsCWin" type="number" min="0" max="1440" style="width:70px">
+      <span class="dim" style="font-size:12px" title="样本少于这个数不判定，防「3 发里 2 发 429」误伤">最少样本</span>
+      <input id="lsCMin" type="number" min="3" max="100" style="width:60px">
+      <span class="dim" style="font-size:12px" title="429 占比达此线 → 不占抽签席（仍在兜底顺序）；降权按此线为满罚刻度线性给">撤席线(占比)</span>
+      <input id="lsCRatio" type="number" min="0.05" max="1" step="0.05" style="width:64px">
+      <button class="btn mini ghost" onclick="saveLoadShareParams(this)">保存慢性参数</button>
+      <span id="lsChronicHint" class="dim" style="font-size:12px"></span>
+    </div>
+    <div class="toolbar" style="margin-top:6px">
+      <span class="dim" style="font-size:12px">供应商封顶（"分摊到各供应商"要落在家这一层，0＝不限）：</span>
+      <span class="dim" style="font-size:12px" title="一家最多占几个抽签席（默认 2）。席位按模型去重，一家高分模型配得多就会成倍吃掉流量；超出上限的同家模型不占席，但仍留在兜底顺序里，别家挂了照样接">每家最多占席</span>
+      <input id="lsSeatCap" type="number" min="0" max="10" step="1" style="width:64px" placeholder="默认 2">
+      <span class="dim" style="font-size:12px" title="一家的应得份额合计上限（默认 0.35＝35%），超出的按权重回灌给还没达线的家。数学下限：上限低于 1/占席家数时自动改用均分线——再低就不可能既封顶又把 100% 分完">单家份额上限</span>
+      <input id="lsCapPct" type="number" min="0" max="1" step="0.05" style="width:64px" placeholder="默认 0.35" oninput="lsCapHint()">
+      <button class="btn mini ghost" onclick="saveLoadShareParams(this)">保存封顶参数</button>
+      <span id="lsCapHint" class="dim" style="font-size:12px"></span>
+    </div>
+    <div class="dim" style="font-size:12px;line-height:1.6;margin-top:4px">
+      份额＝√(偏好分÷席内最大) 归一后再按供应商封顶回灌。<b style="color:#cfe3ff">优先级仍留在份额里</b>：auto 下分数 P=40÷(1+5×priority)，
+      0 级 vs 1 级差 6 倍分→<b style="color:#cfe3ff">2.45 倍份额</b>，1 级 vs 2 级只差 1.35 倍份额（越往后越平）。
+      所以"某家量特别大"先看它的 priority，其次看封顶，速度只影响它能不能进席。
     </div>
     <div class="dim" style="font-size:12px">评分 = 优先级 × 健康度 × 首字速度 × 吞吐 × 费用档 × 语义匹配 × 限流压力 × 工具弱 × 早停嫌疑（各因子平滑降权，永不剔除唯一候选）</div>
   </div>
@@ -2393,7 +2422,7 @@ async function setStrategy(btn) {
     await loadAll();
   }, false);
 }
-// ---- 速带分摊（loadShare）：开关 + 带宽/慢阈值，保存即实时生效并落盘 ----
+// ---- 速带分摊（loadShare）：开关 + 带宽/慢阈值/并列带倍率 + 慢性限流三参数，保存即实时生效并落盘 ----
 async function loadLoadShare() {
   const btn = $('#lsBtn');
   try {
@@ -2402,6 +2431,13 @@ async function loadLoadShare() {
     btn.className = 'btn ' + (r.enabled ? 'warn' : 'ghost');
     $('#lsBand').value = r.bandSize;
     $('#lsSlow').value = r.slowTtftMs;
+    $('#lsTie').value = r.speedTieRatio;
+    $('#lsCWin').value = r.chronicWindowMinutes;
+    $('#lsCMin').value = r.chronicMinSamples;
+    $('#lsCRatio').value = r.chronicSeatBlockRatio;
+    $('#lsSeatCap').value = r.providerSeatCap;
+    $('#lsCapPct').value = r.providerCapPct;
+    lsCapHint();
     const t = r.ttft || {};
     const hint = $('#lsHint');
     if (hint) {
@@ -2412,9 +2448,33 @@ async function loadLoadShare() {
         hint.textContent = '实测样本不足，累计真实请求后自动给出推荐';
       }
     }
+    loadChronicHint();
   } catch (e) {
     // 同 discBtn：启动瞬失败要给可见态，不然按钮永远停在"读取中"
     if (btn) { btn.textContent = '读取失败（点击重试）'; btn.className = 'btn ghost'; }
+  }
+}
+/** 慢性限流现状：把"库里现在看到哪几家长期撞墙"直接列在参数旁边——调参要看得见效果落在谁身上 */
+async function loadChronicHint() {
+  const el = $('#lsChronicHint');
+  if (!el) return;
+  try {
+    const rl = await api('/api/rate-limit-learn');
+    const c = (rl && rl.chronic) || {};
+    const rows = Object.entries(c.providers || {});
+    if (!rows.length) {
+      el.textContent = c.updatedAt ? '近窗口暂无真实流量样本' : '慢性层未取到数据（窗口=0 即关闭）';
+      el.style.color = '';
+      return;
+    }
+    const worst = rows.map(([k, v]) => ({ k, ratio: v.limitRatio || 0, n: v.samples || 0 }))
+      .sort((a, b) => b.ratio - a.ratio).slice(0, 3);
+    const block = parseFloat($('#lsCRatio').value);
+    el.innerHTML = '当前长窗口 429 占比：' + worst.map(w =>
+      `<span style="color:${!isNaN(block) && w.ratio >= block ? '#ff8f8f' : '#cfe3ff'}">${esc(w.k)} ${Math.round(w.ratio * 100)}%(${w.n}发)</span>`
+    ).join(' · ');
+  } catch (e) {
+    el.textContent = '慢性数据读取失败';
   }
 }
 async function toggleLoadShare(btn) {
@@ -2429,13 +2489,44 @@ async function toggleLoadShare(btn) {
 async function saveLoadShareParams(btn) {
   const band = parseInt($('#lsBand').value, 10);
   const slow = parseInt($('#lsSlow').value, 10);
+  const tie = parseFloat($('#lsTie').value);
+  const cWin = parseInt($('#lsCWin').value, 10);
+  const cMin = parseInt($('#lsCMin').value, 10);
+  const cRatio = parseFloat($('#lsCRatio').value);
+  const seatCap = parseInt($('#lsSeatCap').value, 10);
+  const capPct = parseFloat($('#lsCapPct').value);
   if (!(band >= 2 && band <= 10)) { toast('带宽需 2~10', true); return; }
   if (!(slow >= 1000 && slow <= 60000)) { toast('慢阈值需 1000~60000ms', true); return; }
+  if (!(tie >= 1 && tie <= 20)) { toast('并列带倍率需 1~20（1=速度一有差就分份额）', true); return; }
+  if (!(cWin >= 0 && cWin <= 1440)) { toast('慢性窗口需 0~1440 分钟（0=关闭）', true); return; }
+  if (!(cMin >= 3 && cMin <= 100)) { toast('慢性最少样本需 3~100', true); return; }
+  if (!(cRatio >= 0.05 && cRatio <= 1)) { toast('撤席线需 0.05~1（429 占比）', true); return; }
+  if (!(seatCap >= 0 && seatCap <= 10)) { toast('每家最多占席需 0~10（0＝一家不限席）', true); return; }
+  if (!(capPct === 0 || (capPct >= 0.1 && capPct <= 1))) { toast('单家份额上限需 0（不限）或 0.1~1', true); return; }
   await withBusy(btn, '保存中…', async () => {
-    await api('/api/load-share', 'PUT', { bandSize: band, slowTtftMs: slow });
-    toast('速带参数已生效');
+    await api('/api/load-share', 'PUT', {
+      bandSize: band, slowTtftMs: slow, speedTieRatio: tie,
+      chronicWindowMinutes: cWin, chronicMinSamples: cMin, chronicSeatBlockRatio: cRatio,
+      providerSeatCap: seatCap, providerCapPct: capPct,
+    });
+    toast('分摊参数已生效');
   }, false);
   loadLoadShare();
+}
+/** 封顶输入旁边的实时口径提示：上限低于"席内均分线"时服务端会自动改用均分线——
+ *  不写出来，用户设 10% 却看到每家 25% 会以为封顶坏了。 */
+function lsCapHint() {
+  const el = $('#lsCapHint');
+  if (!el) return;
+  const cap = parseFloat($('#lsCapPct').value);
+  const band = parseInt($('#lsBand').value, 10);
+  if (isNaN(cap)) { el.textContent = ''; return; }
+  if (cap === 0) { el.textContent = '份额不限：高分家可以拿走全部席内份额'; el.style.color = ''; return; }
+  const floor = !isNaN(band) ? Math.round(100 / band) : 0;
+  el.innerHTML = cap * 100 < floor
+    ? `<span style="color:var(--warn)">设的 ${Math.round(cap * 100)}% 低于带宽 ${band} 席的均分线 ${floor}%`
+      + `，实际会按均分线走（席内家数更少时还会再放宽）</span>`
+    : `实际上限＝max(${Math.round(cap * 100)}%, 1÷席内家数)；带宽 ${band} 席时不低于 ${floor}%`;
 }
 const v = sel => $(sel).value;
 
@@ -2555,7 +2646,11 @@ function rankPanelHtml(t, scope) {
   const meta = [];
   meta.push('策略 <b>' + esc(STRAT_LABEL[t.strategy] || t.strategy || '-') + '</b>');
   meta.push(t.loadShare
-    ? `分摊 <b style="color:var(--ok)">开</b>（带宽 ${t.bandSize} 席 · 慢阈值 ${t.slowTtftMs}ms）`
+    ? `分摊 <b style="color:var(--ok)">开</b>（带宽 ${t.bandSize} 席 · 绝对慢阈值 ${t.slowTtftMs}ms`
+      + (t.tieSlowMs ? ` · 本次并列带门槛 ${t.tieSlowMs}ms（本组最快 ${t.fastestMs}ms×${t.speedTieRatio || 3}，取宽松侧）` : '')
+      + (t.providerSeatCap ? ` · 每家最多 ${t.providerSeatCap} 席` : ' · 每家不限席')
+      + (t.providerCapPct ? ` · 单家份额上限 ${Math.round(t.providerCapPct * 100)}%（实际取它与均分线的宽松侧）` : ' · 单家份额不限')
+      + '）'
     : `分摊 <b style="color:var(--err)">关</b>（直接取分数首位，不抽签）`);
   meta.push(`参与评分 <b>${rows.length}</b> · 门控出局 <b>${flt.length}</b>`);
   if (t.pickedModel) meta.push(`主选 <b>${esc(t.pickedProvider)}/${esc(t.pickedModel)}</b>`);
@@ -2703,11 +2798,28 @@ async function saveRankTraceConfig(btn) {
 /** 未进抽签席的原因码 → 中文（服务端按码分类计数，界面不猜 note 文案） */
 const BAND_CN = {
   BAND_DUP_KEY:    ['重复 Key 合占席', '同一个模型的多把 Key 只占一个抽签席，这一行是重复 Key，跟首 Key 一起分摊——不是出局'],
-  BAND_SLOW:       ['实测首字慢', '最近实测首字中位超过 shareSlowTtftMs，不占席（仍留在兜底顺序，别家挂了照样接）'],
+  BAND_SLOW:       ['实测首字慢', '最近实测首字中位超过 shareSlowTtftMs（绝对慢门槛，跨场景护栏），不占席（仍留在兜底顺序，别家挂了照样接）'],
+  BAND_REL_SLOW:   ['比本组最快慢出并列带', '绝对门槛判不了"这一组里谁明显落后"：实测首字超过 max(本组最快×shareSpeedTieRatio, 最快+3s) 就不占席。并列带内的家视为"速度相差不是很大"，照样分摊'],
   BAND_VERY_SLOW:  ['反复极慢', '窗口内有多条极慢样本（≥30s 不出首字）被踢出抽签席'],
-  BAND_RATE_LIMIT: ['持续撞限流', '该家近 5 分钟反复撞 429、且学到的额度本来就紧 → 不占抽签席（额度宽的家偶发几次不算，仍给席）'],
+  BAND_RATE_LIMIT: ['近期撞限流', '该家近 5 分钟反复撞 429、且学到的额度本来就紧 → 不占抽签席（额度宽的家偶发几次不算，仍给席）'],
+  BAND_CHRONIC_LIMIT: ['长期撞限流', '长窗口（默认 60 分钟）真实流量里 429 占比超过 chronicSeatBlockRatio，且样本量够（≥chronicRateMinSamples）→ 不占席。这一层读库，重启不会失忆；爆发检测器只管"此刻在撞"，这里管"一直在撞"'],
+  BAND_PROVIDER_SEATS: ['同家席位已满', '这一家已经有 shareProviderSeatCap 个模型占席（默认 2），同家的其它模型不再占抽签席——席位按模型去重，一家高分模型多就会成倍吃掉席。它仍留在兜底顺序里，别家挂了照样接'],
   BAND_NO_SEAT:    ['分数排在席外', '分数排在席位数上限（shareBandSize）之外，或该模型已有别的 Key 占了席'],
 };
+
+/** 把模型级行按<b>供应商</b>加总实际占比：封顶线画在"家"这一层，而模型级表会把
+ *  "一家三个模型各 25%"读成"分摊良好"——用户问的从来是"有没有摊到各家"。
+ *  「应得」一侧不在这里算：模型级均值各自只看自己进席的那几次，相加会超过 100%，
+ *  服务端已按同一决策分母汇总好，界面直接取 providerExpected。 */
+function providerRollup(rows) {
+  const agg = new Map();
+  rows.forEach(r => {
+    let a = agg.get(r.provider);
+    if (!a) { a = { provider: r.provider, requests: 0, actualPct: 0, models: 0 }; agg.set(r.provider, a); }
+    a.requests += r.requests; a.actualPct += r.actualPct || 0; a.models++;
+  });
+  return [...agg.values()].sort((a, b) => b.actualPct - a.actualPct);
+}
 
 /** 页签3：分摊对照——实际分到量 vs 评分应得份额，并把零调用的逐个点名 */
 function renderRankBalance() {
@@ -2724,11 +2836,17 @@ function renderRankBalance() {
     </div>
     <div id="rkBalSummary" class="dim" style="font-size:12px;line-height:1.7;margin-bottom:10px">读取中…</div>
     <div id="rkBalBand"></div>
+    <div id="rkBalProv"></div>
     <div id="rkBalBody"></div>
     <div id="rkBalNever" style="margin-top:12px"></div>
     <div class="dim" style="font-size:12px;line-height:1.6;margin-top:10px">
-      「应得份额」= 抽签席里该渠道出现过的权重（√分数）均值，只有开分摊且进过席才有值。
-      它与实际占比的差，衡量的是<b>抽签运气 + 冷却/预算让路</b>，不是配置错了；
+      「应得份额」= 每次抽签决策里该渠道拿到的权重（√偏好分，偏好分＝综合分÷两个速度因子），
+      <b>分母是"有席的决策数"</b>：没进席的那几次按 0 计入，所以整列加起来≈100%，才和实际占比可比。
+      权重再过一道<b>供应商封顶</b>（每家席位上限 + 每家份额上限，超出按权重回灌给未达线的家）。
+      口径分工：<b>速度只决定能不能进席</b>（绝对慢门槛 + 与本组最快的并列带），
+      <b>进席后接几成流量由偏好决定</b>（你的权重、优先级、费用档、健康、限流）——
+      同席即视为"速度相差不是很大"，再按速度分份额就是同一件事罚两遍，快的家照样拿走大半。
+      它与实际占比的差＝<b>进不了席的次数 + 抽签运气 + 冷却/预算让路</b>，不是配置错了；
       真正的答案在下方的零调用清单：那才是"配了却没分到量"。</div>`;
   loadLoadBalance(3);
 }
@@ -2756,13 +2874,22 @@ async function loadLoadBalance(days, client) {
   const top1 = rows.length ? rows[0].actualPct : 0;
   const pct1 = x => Math.round(x * 10) / 10;    // 占比是后端算好的浮点，累加后必须再收一位，否则界面出现 92.69999%
   const top3 = pct1(rows.slice(0, 3).reduce((s, r) => s + (r.actualPct || 0), 0));
+  const provList = providerRollup(rows);
+  const pTop = provList.length ? pct1(provList[0].actualPct) : 0;
+  const capPct = d.providerCapPct ? Math.round(d.providerCapPct * 100) : 0;
+  // 判超线用"本窗口实际生效线"：封顶取 max(配置值, 1÷占席家数)，两家分席时线是 50%，
+  // 拿配置值 35% 去比会把合法的放宽标成红字（假告警）。服务端按每次决策算好再取均值。
+  const effPct = d.providerCapPctEffective == null ? capPct : Math.round(d.providerCapPctEffective * 100);
+  const seatCap = d.providerSeatCap || 0;
   const spread = nZero > rows.length;           // 已启用却零调用比分到量的还多=没摊开
   const verdict = !rows.length
     ? '<b style="color:var(--warn)">窗口内没有任何调用</b>'
     : top1 >= 70 ? `<b style="color:var(--err)">流量集中在单一模型（最高占 ${top1}%）</b>`
-    : (top3 >= 90 || spread)
-      ? `<b style="color:var(--warn)">前 3 个模型吃掉 ${top3}%，另有 ${nZero} 个已启用的模型零调用——分摊没铺开</b>`
-      : `<b style="color:var(--ok)">分摊在起作用：前 3 占 ${top3}%，覆盖 ${rows.length} 个渠道</b>`;
+    : provList.length > 1 && pTop >= 70
+      ? `<b style="color:var(--err)">按模型看像摊开了，按供应商看仍集中：${esc(provList[0].provider)} 一家占 ${pTop}%</b>`
+      : (top3 >= 90 || spread)
+        ? `<b style="color:var(--warn)">前 3 个模型吃掉 ${top3}%，另有 ${nZero} 个已启用的模型零调用——分摊没铺开</b>`
+        : `<b style="color:var(--ok)">分摊在起作用：前 3 占 ${top3}%，覆盖 ${rows.length} 个渠道</b>`;
   $('#rkBalSummary').innerHTML =
     `总请求 <b>${d.totalRequests}</b> · 实际调用到 <b>${rows.length}</b> 个「供应商×模型」 ·
      已启用但零调用 <b style="color:${nZero ? 'var(--err)' : 'var(--ok)'}">${nZero}</b> 个${nOff ? `（另有 ${nOff} 条是停用/无渠道，不参与评分）` : ''} · ${verdict}
@@ -2780,6 +2907,36 @@ async function loadLoadBalance(days, client) {
             ${esc((BAND_CN[k] || [k])[0])} <b>${band[k]}</b> 行</span>`).join(' ')
         : '<span class="dim">窗口内没有"未进席"记录（样本不足，或候选都进了席）</span>'}
     </div>`;
+  // 供应商级汇总 + 封顶线：让"一家占几成"这件事在本窗口就能判，不靠人肉把同家几行加起来
+  const expProv = d.providerExpected || {};
+  const expSeen = provList.map(p => expProv[p.provider]).filter(v => v != null);
+  const expSum = expSeen.length ? expSeen.reduce((s, v) => s + v, 0) : null;
+  $('#rkBalProv').innerHTML = provList.length ? `
+    <div class="dim" style="font-size:12px;margin:0 0 4px">按<b>供应商</b>汇总（封顶画在这一层：${
+      capPct ? `单家份额上限 <b style="color:#cfe3ff">${capPct}%</b>` : '单家份额未设上限'
+    }${capPct && effPct !== capPct ? `，<b>本窗口实际线 ${effPct}%</b>（占席家数少时按均分线放宽）`
+      : (capPct && d.providerCapPctEffective == null ? `，<b>窗口内样本还没带封顶信息，暂按配置线 ${capPct}% 判</b>` : '')}${seatCap ? ` · 每家最多 <b>${seatCap}</b> 席` : ' · 每家不限席位'}）：</div>
+    <table style="width:100%"><thead><tr class="dim" style="font-size:12px">
+      <th>供应商</th><th>接到量的模型</th><th>实际次数</th><th>实际占比</th><th>应得份额</th><th>应得比${capPct && effPct !== capPct ? '实际线' : '上限'}</th></tr></thead>
+    <tbody>${provList.map(p => {
+      const act = pct1(p.actualPct);
+      const exp = expProv[p.provider] == null ? null : pct1(expProv[p.provider]);
+      const over = exp == null || !effPct ? null : +(exp - effPct).toFixed(1);
+      return `<tr><td>${esc(p.provider)}</td><td class="dim">${p.models}</td><td>${p.requests}</td>
+        <td>${act}%</td>
+        <td style="color:${over != null && over > 0.5 ? 'var(--err)' : 'inherit'}">${exp == null ? '<span class="dim">暂无观测</span>' : exp + '%'}</td>
+        <td class="dim">${over == null ? '—' : (over > 0 ? '+' : '') + over + 'pt'}</td></tr>`;
+    }).join('')}</tbody>
+    <tfoot><tr class="dim" style="font-size:12px"><td>合计</td><td></td><td>${d.totalRequests}</td>
+      <td>${pct1(provList.reduce((s, p) => s + p.actualPct, 0))}%</td>
+      <td>${expSum == null ? '—' : pct1(expSum) + '%'}</td><td>应得应加总≈100%</td></tr></tfoot></table>
+    <div class="dim" style="font-size:12px;margin-top:2px">「应得份额」＝服务端按<b>每次决策</b>把同家几席加总后再取均值（同一分母，所以各家加起来＝100%），
+      它是过了封顶之后长期该接的几成，也是判"封顶有没有生效"的那个数。
+      实际占比高于上限不等于封顶失效：别家被撤席、熔断或全挂兜底时量会临时压到这一家，抽签本身也有运气；
+      <b>应得</b>持续超线才说明封顶没咬住（多半是这些观测来自改参数之前），该重发流量再看。
+      封顶线取<b>宽松侧</b>＝max(配置值, 1÷该次决策占席家数)：若窗口里常常只有两家进席，线就是 50%，
+      这时"应得 45%"并没违规——想让三家各 33%，先把席位封顶放宽或把别家的分/速度扶起来。</div>`
+    : '';
   const tb = rows.map((r, i) => {
     const diff = r.expectedShare == null ? null : +(r.actualPct - r.expectedShare).toFixed(1);
     const dc = diff == null ? 'dim' : diff <= -10 ? 'style="color:var(--err)"' : diff >= 10 ? 'style="color:var(--warn)"' : '';
@@ -2823,12 +2980,17 @@ async function loadUsageBalance(btn) {
   const nOff = never.length - nZero;
   const top3 = rows.slice(0, 3).map(r => `${r.provider}/${r.model} ${r.actualPct}%`).join(' · ');
   const p3 = Math.round(rows.slice(0, 3).reduce((s, r) => s + (r.actualPct || 0), 0) * 10) / 10;
+  const prov = providerRollup(rows);
+  const pTop = prov.length ? Math.round(prov[0].actualPct * 10) / 10 : 0;
   const verdict = !rows.length
     ? '<b style="color:var(--warn)">近 3 天没有任何调用</b>'
     : (rows[0].actualPct >= 70 || p3 >= 90 || nZero > rows.length)
       ? `<b style="color:var(--err)">分摊没铺开</b>：${rows.length} 个分到量的渠道里前 3 个吃掉 ${p3}%，
          另有 <b style="color:var(--err)">${nZero}</b> 个已启用的模型一次没被调用（逐个原因见「打开分摊对照」）`
-      : `<b style="color:var(--ok)">分摊在起作用</b>：${rows.length} 个渠道都有量（前 3 占 ${p3}%），已启用零调用 ${nZero} 个`;
+      : (prov.length > 1 && pTop >= 70)
+        ? `<b style="color:var(--err)">按供应商看仍集中：${esc(prov[0].provider)} 一家占 ${pTop}%</b>
+           ——模型级看着摊开，是因为同家几个模型各分了一点`
+        : `<b style="color:var(--ok)">分摊在起作用</b>：${rows.length} 个渠道都有量（前 3 占 ${p3}%），已启用零调用 ${nZero} 个`;
   const band = d.bandOutReasons || {};
   const bandKeys = Object.keys(band).sort((a, b) => band[b] - band[a]);
   const bandTxt = bandKeys.length
@@ -2836,6 +2998,11 @@ async function loadUsageBalance(btn) {
   el.innerHTML = `总请求 <b>${d.totalRequests}</b> · 调用到 <b>${rows.length}</b> 个「供应商×模型」 ·
     已启用但零调用 <b style="color:${nZero ? 'var(--err)' : 'var(--ok)'}">${nZero}</b> 个${nOff ? `（另有 ${nOff} 个是配置里就停用/无渠道的，不参与评分）` : ''}<br>
     ${verdict}<br>${top3 ? '<span class="dim">占比前三：' + esc(top3) + '</span>' : ''}
+    ${prov.length ? '<span class="dim"> ｜ 按供应商 ' + prov.length + ' 家分到量，最高 '
+      + esc(prov[0].provider) + ' 占 <b>' + pTop + '%</b>'
+      + ((d.providerExpected || {})[prov[0].provider] != null
+        ? '（评分应得 ' + Math.round(d.providerExpected[prov[0].provider] * 10) / 10 + '%）' : '')
+      + '</span>' : ''}
     <br><span class="dim">口径：${esc(d.usageScope || '实际侧＝全部来源')}；应得侧观测 ${d.shareSamples || 0} 次决策${bandTxt ? ' · 未进席：' + esc(bandTxt) : ''}
     （逐条原因与来源过滤在「打开分摊对照」里）</span>`;
 }

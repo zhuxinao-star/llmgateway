@@ -247,10 +247,18 @@ public class GatewayConfig {
         private int probeMaxTokens = 8;             // 每次探测的 max_tokens（probe 只测连通/首字速度，产 token 越少越省）
         private int clientMaxConcurrency = 2;       // 同一接入工具(client)的最大并发转发数：超并发排队等上一个完成（0=关闭）
         private int clientMaxConcurrencyWaitMs = 30000;  // 排队等待许可的超时：超时放行撞墙防阻塞（ms）
-        private boolean loadShare = true;           // 分摊抽签（auto/priority 策略、非 critical）：排序头部模型按 √(score/max) 概率抽签选主选，
+        private boolean loadShare = true;           // 分摊抽签（auto/priority 策略、非 critical）：排序头部模型按 √(偏好分/席内最大) 概率抽签选主选，
                                                     // 让高分/高优先的健康模型真正分到流量（赢家不再通吃，也避免单家被连发打爆）
         private int shareBandSize = 3;              // 抽签候选池大小（按模型去重后取前 N 个健康高分者）
-        private int shareSlowTtftMs = 6000;         // EWMA 首字超过此值的模型不进抽签（"特别慢"的不尝试，只保留兜底顺序）
+        private int shareSlowTtftMs = 6000;         // 实测首字中位超过此值的模型不进抽签（"特别慢"的不尝试，只保留兜底顺序）
+        private double shareSpeedTieRatio = 3.0;    // 速度并列带倍率：实测首字 ≤ 本组最快×此值（且差值≤3s 时按 3s 起判）视为"相差不是很大"，
+                                                    // 同席后份额不再由速度决定（去掉速度因子，只按用户权重/优先级/费用档/吞吐/健康分摊）
+        private int shareProviderSeatCap = 2;       // 甲·供应商席位封顶：一家最多占几个抽签席（0=不限）。
+                                                    // 席位按模型算，一家有多个高分模型就会按家累加份额——这条把"供应商级"集中度管住
+        private double shareProviderCapPct = 0.35;  // 乙·供应商份额封顶：一家的应得份额合计上限（0=不限）。超出部分按权重回灌给未达线的家
+        private int chronicRateWindowMinutes = 60;  // 慢性限流窗口（分钟，0=关闭该层）：按 request_log 真实流量算每家长期 429 占比，重启不丢
+        private int chronicRateMinSamples = 8;      // 慢性判定所需最少真实样本（防"3 发里 2 发 429"这种小样本误判）
+        private double chronicSeatBlockRatio = 0.3; // 慢性撤席线：长窗口 429 占比达此值 → 不占抽签席（仍留在兜底顺序），降权按此线为满罚刻度线性给
         private int toolWeakSampleThreshold = 20;   // #33 toolWeak 自动学习：带 tools 请求累计达此样本且从未回 tool_calls → 管理页出建议（仅建议，不自动打标）
         private boolean autoDisableEnabled = false;  // 模型自动停用/恢复总开关（默认关，需显式开）：确认"模型不存在"→永久停用；"余额不足"→临时停用（内存态）
         private int reconcileIntervalMinutes = 60;   // 自动停用器扫描间隔（分钟，0=关闭该调度）
@@ -359,6 +367,24 @@ public class GatewayConfig {
 
         public int getShareSlowTtftMs() { return shareSlowTtftMs; }
         public void setShareSlowTtftMs(int v) { this.shareSlowTtftMs = v; }
+
+        public double getShareSpeedTieRatio() { return shareSpeedTieRatio; }
+        public void setShareSpeedTieRatio(double v) { this.shareSpeedTieRatio = v; }
+
+        public int getShareProviderSeatCap() { return shareProviderSeatCap; }
+        public void setShareProviderSeatCap(int v) { this.shareProviderSeatCap = v; }
+
+        public double getShareProviderCapPct() { return shareProviderCapPct; }
+        public void setShareProviderCapPct(double v) { this.shareProviderCapPct = v; }
+
+        public int getChronicRateWindowMinutes() { return chronicRateWindowMinutes; }
+        public void setChronicRateWindowMinutes(int v) { this.chronicRateWindowMinutes = v; }
+
+        public int getChronicRateMinSamples() { return chronicRateMinSamples; }
+        public void setChronicRateMinSamples(int v) { this.chronicRateMinSamples = v; }
+
+        public double getChronicSeatBlockRatio() { return chronicSeatBlockRatio; }
+        public void setChronicSeatBlockRatio(double v) { this.chronicSeatBlockRatio = v; }
         public int getToolWeakSampleThreshold() { return toolWeakSampleThreshold; }
         public void setToolWeakSampleThreshold(int v) { this.toolWeakSampleThreshold = v; }
     }

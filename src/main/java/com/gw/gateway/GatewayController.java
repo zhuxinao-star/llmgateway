@@ -488,7 +488,8 @@ public class GatewayController {
             }
             out.flush();
             // 成功统计
-            Long ttft = firstTokenAt == null ? null : Long.parseLong(firstTokenAt);
+            Long ttft = firstTokenAt == null ? null
+                    : ForwardEngine.streamTtftMs(r, Long.parseLong(firstTokenAt));
             Map<String, Object> finalUsage = usage != null ? usage : adaptor.extractUsage(null);
             recordSuccessAndLog(c, model, ttft, finalUsage, "OK", attemptNo, profile,
                     System.currentTimeMillis() - startMs, client, compress);
