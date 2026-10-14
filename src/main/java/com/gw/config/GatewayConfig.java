@@ -255,6 +255,9 @@ public class GatewayConfig {
                                                     // 同席后份额不再由速度决定（去掉速度因子，只按用户权重/优先级/费用档/吞吐/健康分摊）
         private int shareProviderSeatCap = 2;       // 甲·供应商席位封顶：一家最多占几个抽签席（0=不限）。
                                                     // 席位按模型算，一家有多个高分模型就会按家累加份额——这条把"供应商级"集中度管住
+        private int shareMinSeats = 3;              // 抽签席下限：并列带内不足这么多家时，按实测首字把带外的家补进席
+                                                    // （0=关闭，退回"速度说了算"）。速度只决定谁先入座，不该决定一共几个座——
+                                                    // 否则本组一发快样本就能把池子砍到一两家，其余家永远拿不到流量也永远拿不到新样本
         private double shareProviderCapPct = 0.35;  // 乙·供应商份额封顶：一家的应得份额合计上限（0=不限）。超出部分按权重回灌给未达线的家
         private int chronicRateWindowMinutes = 60;  // 慢性限流窗口（分钟，0=关闭该层）：按 request_log 真实流量算每家长期 429 占比，重启不丢
         private int chronicRateMinSamples = 8;      // 慢性判定所需最少真实样本（防"3 发里 2 发 429"这种小样本误判）
@@ -373,6 +376,9 @@ public class GatewayConfig {
 
         public int getShareProviderSeatCap() { return shareProviderSeatCap; }
         public void setShareProviderSeatCap(int v) { this.shareProviderSeatCap = v; }
+
+        public int getShareMinSeats() { return shareMinSeats; }
+        public void setShareMinSeats(int v) { this.shareMinSeats = v; }
 
         public double getShareProviderCapPct() { return shareProviderCapPct; }
         public void setShareProviderCapPct(double v) { this.shareProviderCapPct = v; }

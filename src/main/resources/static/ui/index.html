@@ -264,7 +264,7 @@
       <button class="btn" onclick="setStrategy(this)">保存并生效</button>
     </div>
     <div class="toolbar" style="margin-top:10px;padding-top:8px;border-top:1px dashed rgba(128,128,128,.35)">
-      <span class="dim" style="font-size:12px">速带分摊（auto/priority/free-only 生效）：<b style="color:#cfe3ff">速度只决定"能不能进席"</b>（绝对慢阈值 + 与本组最快的并列带），<b style="color:#cfe3ff">进席后的份额按偏好分</b>（人工权重/优先级/费用档/健康/限流——两个速度因子都已从份额里除掉），再过一道供应商封顶</span>
+      <span class="dim" style="font-size:12px">速带分摊（auto/priority/free-only 生效）：<b style="color:#cfe3ff">速度只决定"谁先入座"，不决定"一共几个座"</b>（绝对慢阈值 + 与本组最快的并列带排队，带内不足席位下限就按实测首字从带外补席），<b style="color:#cfe3ff">进席后的份额按偏好分</b>（人工权重/优先级/费用档/健康/限流——两个速度因子都已从份额里除掉），再过一道供应商封顶</span>
     </div>
     <div class="toolbar" style="margin-top:6px">
       <button class="btn ghost" id="lsBtn" onclick="toggleLoadShare(this)">读取中</button>
@@ -274,6 +274,8 @@
       <input id="lsSlow" type="number" min="1000" max="60000" step="500" style="width:86px">
       <span class="dim" style="font-size:12px" title="比本组最快慢过「最快×此倍」且慢过 3 秒的模型不占抽签席（取宽松一侧，亚秒级差异都算并列）">并列带倍率</span>
       <input id="lsTie" type="number" min="1" max="20" step="0.5" style="width:64px">
+      <span class="dim" style="font-size:12px" title="带内的家不足这个数时，按实测首字从带外补进抽签席（0＝关闭，退回「速度说了算」）。补的只是席位，份额仍按偏好分。背景：本组有一发 850ms 的快模型时，3.8s 的门槛会把 9 家砍到 2 家，其余家整年拿不到流量">席位下限(家)</span>
+      <input id="lsMinSeats" type="number" min="0" max="10" step="1" style="width:64px" placeholder="默认 3">
       <button class="btn mini ghost" onclick="saveLoadShareParams(this)">保存参数</button>
       <span id="lsHint" class="dim" style="font-size:12px"></span>
     </div>
@@ -2422,7 +2424,7 @@ async function setStrategy(btn) {
     await loadAll();
   }, false);
 }
-// ---- 速带分摊（loadShare）：开关 + 带宽/慢阈值/并列带倍率 + 慢性限流三参数，保存即实时生效并落盘 ----
+// ---- 速带分摊（loadShare）：开关 + 带宽/慢阈值/并列带倍率/席位下限 + 慢性限流三参数 + 供应商两条封顶，保存即实时生效并落盘 ----
 async function loadLoadShare() {
   const btn = $('#lsBtn');
   try {
@@ -2432,6 +2434,7 @@ async function loadLoadShare() {
     $('#lsBand').value = r.bandSize;
     $('#lsSlow').value = r.slowTtftMs;
     $('#lsTie').value = r.speedTieRatio;
+    $('#lsMinSeats').value = r.minSeats;
     $('#lsCWin').value = r.chronicWindowMinutes;
     $('#lsCMin').value = r.chronicMinSamples;
     $('#lsCRatio').value = r.chronicSeatBlockRatio;
@@ -2490,6 +2493,7 @@ async function saveLoadShareParams(btn) {
   const band = parseInt($('#lsBand').value, 10);
   const slow = parseInt($('#lsSlow').value, 10);
   const tie = parseFloat($('#lsTie').value);
+  const minSeats = parseInt($('#lsMinSeats').value, 10);
   const cWin = parseInt($('#lsCWin').value, 10);
   const cMin = parseInt($('#lsCMin').value, 10);
   const cRatio = parseFloat($('#lsCRatio').value);
@@ -2498,6 +2502,7 @@ async function saveLoadShareParams(btn) {
   if (!(band >= 2 && band <= 10)) { toast('带宽需 2~10', true); return; }
   if (!(slow >= 1000 && slow <= 60000)) { toast('慢阈值需 1000~60000ms', true); return; }
   if (!(tie >= 1 && tie <= 20)) { toast('并列带倍率需 1~20（1=速度一有差就分份额）', true); return; }
+  if (!(minSeats >= 0 && minSeats <= 10)) { toast('席位下限需 0~10（0＝关闭，退回速度说了算）', true); return; }
   if (!(cWin >= 0 && cWin <= 1440)) { toast('慢性窗口需 0~1440 分钟（0=关闭）', true); return; }
   if (!(cMin >= 3 && cMin <= 100)) { toast('慢性最少样本需 3~100', true); return; }
   if (!(cRatio >= 0.05 && cRatio <= 1)) { toast('撤席线需 0.05~1（429 占比）', true); return; }
@@ -2505,7 +2510,7 @@ async function saveLoadShareParams(btn) {
   if (!(capPct === 0 || (capPct >= 0.1 && capPct <= 1))) { toast('单家份额上限需 0（不限）或 0.1~1', true); return; }
   await withBusy(btn, '保存中…', async () => {
     await api('/api/load-share', 'PUT', {
-      bandSize: band, slowTtftMs: slow, speedTieRatio: tie,
+      bandSize: band, slowTtftMs: slow, speedTieRatio: tie, minSeats: minSeats,
       chronicWindowMinutes: cWin, chronicMinSamples: cMin, chronicSeatBlockRatio: cRatio,
       providerSeatCap: seatCap, providerCapPct: capPct,
     });
@@ -2650,6 +2655,9 @@ function rankPanelHtml(t, scope) {
       + (t.tieSlowMs ? ` · 本次并列带门槛 ${t.tieSlowMs}ms（本组最快 ${t.fastestMs}ms×${t.speedTieRatio || 3}，取宽松侧）` : '')
       + (t.providerSeatCap ? ` · 每家最多 ${t.providerSeatCap} 席` : ' · 每家不限席')
       + (t.providerCapPct ? ` · 单家份额上限 ${Math.round(t.providerCapPct * 100)}%（实际取它与均分线的宽松侧）` : ' · 单家份额不限')
+      + (t.seatFloor ? ` · 席位下限 ${t.seatFloor} 家（带内不足时按实测首字从带外补席）` : ' · 无席位下限（带内几家算几家）')
+      + (t.seatsStrict ? ` · <b style="color:#cfe3ff">本轮 ${t.seatsStrict} 家带内</b>`
+        + (t.seatsRelaxed ? `＋${t.seatsRelaxed} 家放宽补席` : '（无需补席）') : '')
       + '）'
     : `分摊 <b style="color:var(--err)">关</b>（直接取分数首位，不抽签）`);
   meta.push(`参与评分 <b>${rows.length}</b> · 门控出局 <b>${flt.length}</b>`);
@@ -2799,7 +2807,7 @@ async function saveRankTraceConfig(btn) {
 const BAND_CN = {
   BAND_DUP_KEY:    ['重复 Key 合占席', '同一个模型的多把 Key 只占一个抽签席，这一行是重复 Key，跟首 Key 一起分摊——不是出局'],
   BAND_SLOW:       ['实测首字慢', '最近实测首字中位超过 shareSlowTtftMs（绝对慢门槛，跨场景护栏），不占席（仍留在兜底顺序，别家挂了照样接）'],
-  BAND_REL_SLOW:   ['比本组最快慢出并列带', '绝对门槛判不了"这一组里谁明显落后"：实测首字超过 max(本组最快×shareSpeedTieRatio, 最快+3s) 就不占席。并列带内的家视为"速度相差不是很大"，照样分摊'],
+  BAND_REL_SLOW:   ['比本组最快慢出并列带', '绝对门槛判不了"这一组里谁明显落后"：实测首字超过 max(本组最快×shareSpeedTieRatio, 最快+3s) 就不占席。并列带只用来排队、不用来决定一共几个座——带内不足 shareMinSeats 时按实测首字从带外补席（界面会标"放宽补席"），补完仍轮不到的才记这个码'],
   BAND_VERY_SLOW:  ['反复极慢', '窗口内有多条极慢样本（≥30s 不出首字）被踢出抽签席'],
   BAND_RATE_LIMIT: ['近期撞限流', '该家近 5 分钟反复撞 429、且学到的额度本来就紧 → 不占抽签席（额度宽的家偶发几次不算，仍给席）'],
   BAND_CHRONIC_LIMIT: ['长期撞限流', '长窗口（默认 60 分钟）真实流量里 429 占比超过 chronicSeatBlockRatio，且样本量够（≥chronicRateMinSamples）→ 不占席。这一层读库，重启不会失忆；爆发检测器只管"此刻在撞"，这里管"一直在撞"'],
@@ -2915,7 +2923,7 @@ async function loadLoadBalance(days, client) {
     <div class="dim" style="font-size:12px;margin:0 0 4px">按<b>供应商</b>汇总（封顶画在这一层：${
       capPct ? `单家份额上限 <b style="color:#cfe3ff">${capPct}%</b>` : '单家份额未设上限'
     }${capPct && effPct !== capPct ? `，<b>本窗口实际线 ${effPct}%</b>（占席家数少时按均分线放宽）`
-      : (capPct && d.providerCapPctEffective == null ? `，<b>窗口内样本还没带封顶信息，暂按配置线 ${capPct}% 判</b>` : '')}${seatCap ? ` · 每家最多 <b>${seatCap}</b> 席` : ' · 每家不限席位'}）：</div>
+      : (capPct && d.providerCapPctEffective == null ? `，<b>窗口内样本还没带封顶信息，暂按配置线 ${capPct}% 判</b>` : '')}${seatCap ? ` · 每家最多 <b>${seatCap}</b> 席` : ' · 每家不限席位'}${d.minSeats ? ` · 席位下限 <b>${d.minSeats}</b> 家（带内不足时按实测首字放宽补席，所以慢家也会有应得份额）` : ''}）：</div>
     <table style="width:100%"><thead><tr class="dim" style="font-size:12px">
       <th>供应商</th><th>接到量的模型</th><th>实际次数</th><th>实际占比</th><th>应得份额</th><th>应得比${capPct && effPct !== capPct ? '实际线' : '上限'}</th></tr></thead>
     <tbody>${provList.map(p => {

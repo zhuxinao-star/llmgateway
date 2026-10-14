@@ -300,6 +300,7 @@ public class PolicyService {
             out.speedTieRatio = d.getShareSpeedTieRatio();
             out.providerSeatCap = Math.max(0, d.getShareProviderSeatCap());
             out.providerCapPct = d.getShareProviderCapPct();
+            out.seatFloor = Math.max(0, d.getShareMinSeats());
         }
         // 策略级费用硬过滤：paid-only/free-only 把对侧档位在分类前整批剔除——usable/exhausted/
         // cooling 三个池都进不去，所以"全灭强放行"、"付费保底兜底"等任何路径都不可能把流量交给
@@ -438,6 +439,11 @@ public class PolicyService {
             int bandCap = Math.max(2, d.getShareBandSize());
             int seatCapPerProvider = Math.max(0, d.getShareProviderSeatCap());   // 0=一家不限席
             Map<String, Integer> seatCount = new HashMap<>();
+            // 只被"并列带"挡住的家（其它硬门槛挡的不进这个池）。并列带用来排队，不用来决定席位数——
+            // 带内席位凑不满 shareMinSeats 时从这里补，见 relaxSeatOrder。
+            List<SeatCand> relSlowPool = new ArrayList<>();
+            List<Scored> relSlowSrc = new ArrayList<>();
+            Set<String> relSlowModels = new HashSet<>();   // 同一模型的多把 Key 只在补席池里留一份
             ConfigService.Snapshot bandSnap = configService.snapshot();
             // 并列带参照系：本组"实测最快"的首字时间。取全部健康候选而不是前 N 个——按分数排在前面的
             // 家未必是最快的（用户权重/优先级会把它顶上来），拿它当基准会把"其实大家都挺快"误判成"并列"。
@@ -475,6 +481,10 @@ public class PolicyService {
                 if (tieSlowMs > 0 && myTtft > tieSlowMs) {
                     bandOut(rowOf, s, BAND_REL_SLOW, "实测首字 " + (long) myTtft + "ms 比本组最快的 "
                             + (long) fastestMs + "ms 慢出并列带（门槛 " + (long) tieSlowMs + "ms），不占抽签席");
+                    if (relSlowModels.add(s.candidate.providerId() + "\n" + s.candidate.model())) {
+                        relSlowPool.add(new SeatCand(s.candidate.providerId(), myTtft));
+                        relSlowSrc.add(s);
+                    }
                     continue;
                 }
                 // 极慢样本硬过滤：中位数会被一次 230s 尖峰稀释掉（环窗里其余都是快样本），
@@ -525,6 +535,37 @@ public class PolicyService {
                 seatCount.merge(s.candidate.providerId(), 1, Integer::sum);
                 band.add(s);
             }
+            // ---- 席位下限：并列带只负责"谁先入座"，不负责"一共几个座"（2026-10-14 实锤）----
+            //  本组只要有一发 848ms 的快模型，带门槛就被钉在 3.8s，32 个候选/9 家只剩 2 家占席——
+            //  抽签再怎么公平也只是在两家里分，用户配的其余家永远拿不到流量（"怼着一家死磕"的真凶）。
+            //  补席同时打断负反馈：被撤席→没流量→没新样本→估值停在旧慢值→继续被撤席。
+            //  只补到下限（不补满 bandCap），且硬门槛一律不让路：无 Key/熔断/限流密度/慢性撤席/
+            //  绝对慢/极慢样本/同家席位封顶都在上面 continue 掉了，进不了 relSlowPool。
+            int seatFloor = Math.min(Math.max(0, d.getShareMinSeats()), bandCap);
+            int strictSeats = band.size();
+            List<Integer> relaxed = relaxSeatOrder(relSlowPool, seatProviders(band), bandCap,
+                    seatCapPerProvider, seatFloor);
+            for (int i : relaxed) {
+                Scored s = relSlowSrc.get(i);
+                band.add(s);
+                seatCount.merge(s.candidate.providerId(), 1, Integer::sum);
+                if (rowOf != null) {
+                    RankTrace.Row r = rowOf.get(s);
+                    if (r != null) {
+                        r.bandOut = null;   // 本轮它确实占席，只是带被放宽了
+                        r.note = "实测首字 " + (long) relSlowPool.get(i).ttftMs() + "ms 慢出并列带（门槛 "
+                                + (long) tieSlowMs + "ms），但带内只剩 " + strictSeats + " 家、不足席位下限 "
+                                + seatFloor + "，本轮放宽补进抽签席";
+                    }
+                }
+            }
+            if (out != null) {
+                out.seatsStrict = strictSeats;
+                out.seatsRelaxed = relaxed.size();
+            }
+            String relaxNote = relaxed.isEmpty() ? null
+                    : "并列带本轮只出 " + strictSeats + " 席，已按实测首字补 " + relaxed.size()
+                            + " 席到席位下限 " + seatFloor;
             if (band.size() > 1) {
                 // 份额口径：√(偏好分/席内最大偏好分) 归一，偏好分=总分去掉两个速度因子（见 prefScore），
                 // 再按供应商份额上限回灌（见 providerCappedShares）。
@@ -565,7 +606,8 @@ public class PolicyService {
                     int seat = band.indexOf(chosen) + 1;
                     out.pickReason = (chosen == usable.get(0) ? "分摊抽签命中第 " + seat + " 席（本就到了首位）"
                             : "分摊抽签命中第 " + seat + " 席，置顶取代分数首位")
-                            + (fallbackNote == null ? "" : "；" + fallbackNote);
+                            + (fallbackNote == null ? "" : "；" + fallbackNote)
+                            + (relaxNote == null ? "" : "；" + relaxNote);
                 }
                 if (chosen != usable.get(0)) {
                     usable.remove(chosen);   // 按引用移除（Scored 未覆写 equals）
@@ -760,6 +802,53 @@ public class PolicyService {
      *  是"相差不是很大"），纯按绝对差则会让 20s 与 17s 并列。取 max 后两者都要"明显落后"才出局。 */
     static double shareTieSlowThresholdMs(double fastestMs, double tieRatio) {
         return Math.max(fastestMs * Math.max(1.0, tieRatio), fastestMs + SHARE_TIE_MIN_SPREAD_MS);
+    }
+
+    /** 补席候选：一个家的实测首字（ms，-1=无实测）。 */
+    record SeatCand(String provider, double ttftMs) {}
+
+    private static List<String> seatProviders(List<Scored> band) {
+        List<String> p = new ArrayList<>(band.size());
+        for (Scored s : band) p.add(s.candidate.providerId());
+        return p;
+    }
+
+    /**
+     * 席位下限的补席决策（纯函数——"速度只排队、不缩池"这条不变量就钉在它的单测上）。
+     * 并列带把抽签池砍到不足 minSeats 家时，从被带挡在外面的家里按实测首字补进席，因为：
+     *   ① 用户配多家供应商的目的就是分摊，池子塌到一两家的话抽签只能在两家里分，
+     *      余下的家整年拿不到流量（2026-10-14 实测：本组最快 848ms 把门槛钉在 3.8s，
+     *      32 候选/9 家只剩 2 家占席，19 个过绝对门槛的模型被"相对慢"判死）；
+     *   ② 被撤席＝没流量＝没新样本＝估值停在旧的慢值＝继续被撤席，这条闭环只能靠"照样给一席"打断。
+     * 规矩：无实测（-1）排最前（没测过的正该试一枪，与原"无实测放行"同一口径）；其余按实测首字升序，
+     * 让步也要让给带外最快的那家；bandCap 与同家席位封顶是硬上限，补席不越过；达到 minSeats 即停，不多让。
+     * 家名参与定序，保证同一份输入结果可重放（单测据此断言）。
+     *
+     * @return relSlowPool 中应补进席位的下标，按补席次序
+     */
+    static List<Integer> relaxSeatOrder(List<SeatCand> relSlowPool, List<String> seatedProviders,
+                                        int bandCap, int seatCapPerProvider, int minSeats) {
+        int seats = seatedProviders.size();
+        int target = Math.min(minSeats, bandCap);
+        if (target <= seats || relSlowPool.isEmpty()) return List.of();
+        Map<String, Integer> perProvider = new HashMap<>();
+        for (String p : seatedProviders) perProvider.merge(p, 1, Integer::sum);
+        List<Integer> order = new ArrayList<>(relSlowPool.size());
+        for (int i = 0; i < relSlowPool.size(); i++) order.add(i);
+        order.sort(Comparator.<Integer, Long>comparing(i -> {
+            double t = relSlowPool.get(i).ttftMs();
+            return t < 0 ? Long.MIN_VALUE : (long) t;
+        }).thenComparing(i -> relSlowPool.get(i).provider()));
+        List<Integer> picked = new ArrayList<>();
+        for (int i : order) {
+            if (seats >= target) break;
+            String p = relSlowPool.get(i).provider();
+            if (seatCapPerProvider > 0 && perProvider.getOrDefault(p, 0) >= seatCapPerProvider) continue;
+            picked.add(i);
+            perProvider.merge(p, 1, Integer::sum);
+            seats++;
+        }
+        return picked;
     }
 
     /** 吞吐因子＝出字速度：地板 0.4，每 80 tok/s 加 1.0（48 tok/s 才是中性 1.0），≈168 tok/s 起封顶 2.5；
@@ -1744,6 +1833,11 @@ public class PolicyService {
         public double speedTieRatio;
         public long tieSlowMs;
         public long fastestMs;
+        /** 席位下限（shareMinSeats）与本轮席位数：带内 strict + 带外放宽补进 relaxed。
+         *  界面必须说清"本轮几家在抽签席上"，否则用户只能从流量分布里反推池子塌没塌。 */
+        public int seatFloor;
+        public int seatsStrict;
+        public int seatsRelaxed;
         /** 供应商级封顶：甲＝一家最多占几席（0=不限），乙＝一家应得份额上限（0=不限）。界面要说清本次按什么线画的 */
         public int providerSeatCap;
         public double providerCapPct;
@@ -1786,6 +1880,9 @@ public class PolicyService {
             m.put("speedTieRatio", speedTieRatio);
             m.put("tieSlowMs", tieSlowMs);
             m.put("fastestMs", fastestMs);
+            m.put("seatFloor", seatFloor);
+            m.put("seatsStrict", seatsStrict);
+            m.put("seatsRelaxed", seatsRelaxed);
             if (providerSeatCap > 0) m.put("providerSeatCap", providerSeatCap);
             if (providerCapPct > 0) m.put("providerCapPct", providerCapPct);
             m.put("preview", preview);
@@ -1822,6 +1919,9 @@ public class PolicyService {
             t.speedTieRatio = num(m.get("speedTieRatio"), 0);
             t.tieSlowMs = (long) num(m.get("tieSlowMs"), 0);
             t.fastestMs = (long) num(m.get("fastestMs"), 0);
+            t.seatFloor = (int) num(m.get("seatFloor"), 0);
+            t.seatsStrict = (int) num(m.get("seatsStrict"), 0);
+            t.seatsRelaxed = (int) num(m.get("seatsRelaxed"), 0);
             t.providerSeatCap = (int) num(m.get("providerSeatCap"), 0);
             t.providerCapPct = num(m.get("providerCapPct"), 0);
             t.preview = Boolean.TRUE.equals(m.get("preview"));

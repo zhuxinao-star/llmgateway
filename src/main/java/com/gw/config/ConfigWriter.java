@@ -76,6 +76,8 @@ public final class ConfigWriter {
         // 供应商级封顶（甲席位/乙份额）：0＝不限本身是有意的动作，必须存得住，所以恒写
         y.append("  shareProviderSeatCap: ").append(d.getShareProviderSeatCap()).append('\n');
         y.append("  shareProviderCapPct: ").append(d.getShareProviderCapPct()).append('\n');
+        // 抽签席下限：0＝关闭补席（退回"速度说了算"），同样是有意的动作，须存得住
+        y.append("  shareMinSeats: ").append(d.getShareMinSeats()).append('\n');
         // 慢性限流（读库长窗口 429 占比）：窗口=0 即关闭该层，仍照写——关掉这个动作本身要存得住
         y.append("  chronicRateWindowMinutes: ").append(d.getChronicRateWindowMinutes()).append('\n');
         y.append("  chronicRateMinSamples: ").append(d.getChronicRateMinSamples()).append('\n');

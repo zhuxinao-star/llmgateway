@@ -63,6 +63,9 @@ public class RankTraceTest {
               # 封顶本身由 ⑨ 单独验（那一条再把 2 席 / 35% 写回来）
               shareProviderSeatCap: 0
               shareProviderCapPct: 0
+              # ⑤ 那条测的是"掉出并列带就撤席"，而席位下限会把带外最快的家再补回来（同一条断言两种规则）；
+              # 补席本身由 ShareSeatFloorTest 单独钉，这里显式关掉，两条用例才各测一件事。
+              shareMinSeats: 0
               chronicRateMinSamples: 8
               chronicSeatBlockRatio: 0.3
             providers:

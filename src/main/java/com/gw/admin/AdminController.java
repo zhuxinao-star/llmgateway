@@ -963,6 +963,7 @@ public class AdminController {
         out.put("speedTieRatio", d.getShareSpeedTieRatio());
         out.put("providerSeatCap", d.getShareProviderSeatCap());
         out.put("providerCapPct", d.getShareProviderCapPct());
+        out.put("minSeats", d.getShareMinSeats());
         out.put("chronicWindowMinutes", d.getChronicRateWindowMinutes());
         out.put("chronicMinSamples", d.getChronicRateMinSamples());
         out.put("chronicSeatBlockRatio", d.getChronicSeatBlockRatio());
@@ -979,6 +980,7 @@ public class AdminController {
         Double tie = doubleOrNull(body.get("speedTieRatio"));
         Integer seatCap = intOrNull(body.get("providerSeatCap"));
         Double capPct = doubleOrNull(body.get("providerCapPct"));
+        Integer minSeats = intOrNull(body.get("minSeats"));
         Integer cWin = intOrNull(body.get("chronicWindowMinutes"));
         Integer cMin = intOrNull(body.get("chronicMinSamples"));
         Double cRatio = doubleOrNull(body.get("chronicSeatBlockRatio"));
@@ -989,12 +991,14 @@ public class AdminController {
         // 0 是"关闭封顶"的显式动作，必须能存住，所以单独放行；非 0 时低于 10% 无意义（一家连一成都接不住）
         if (capPct != null && !(capPct == 0 || (capPct >= 0.1 && capPct <= 1.0)))
             return bad("providerCapPct 需为 0（不限）或 0.1~1.0");
+        if (minSeats != null && (minSeats < 0 || minSeats > 10))
+            return bad("minSeats 需在 0~10（0=关闭席位下限，退回速度说了算）");
         if (cWin != null && (cWin < 0 || cWin > 1440)) return bad("chronicWindowMinutes 需在 0~1440（0=关闭慢性限流层）");
         if (cMin != null && (cMin < 3 || cMin > 100)) return bad("chronicMinSamples 需在 3~100");
         if (cRatio != null && (cRatio < 0.05 || cRatio > 1.0)) return bad("chronicSeatBlockRatio 需在 0.05~1.0");
         if (en == null && band == null && slow == null && tie == null && seatCap == null && capPct == null
-                && cWin == null && cMin == null && cRatio == null)
-            return bad("enabled/bandSize/slowTtftMs/speedTieRatio/providerSeatCap/providerCapPct/慢性限流参数 至少给一个");
+                && minSeats == null && cWin == null && cMin == null && cRatio == null)
+            return bad("enabled/bandSize/slowTtftMs/speedTieRatio/providerSeatCap/providerCapPct/minSeats/慢性限流参数 至少给一个");
         try {
             configService.persist(cfg -> {
                 GatewayConfig.Defaults d = cfg.getDefaults();
@@ -1004,6 +1008,7 @@ public class AdminController {
                 if (tie != null) d.setShareSpeedTieRatio(tie);
                 if (seatCap != null) d.setShareProviderSeatCap(seatCap);
                 if (capPct != null) d.setShareProviderCapPct(capPct);
+                if (minSeats != null) d.setShareMinSeats(minSeats);
                 if (cWin != null) d.setChronicRateWindowMinutes(cWin);
                 if (cMin != null) d.setChronicRateMinSamples(cMin);
                 if (cRatio != null) d.setChronicSeatBlockRatio(cRatio);
@@ -1017,6 +1022,7 @@ public class AdminController {
             out.put("speedTieRatio", nd.getShareSpeedTieRatio());
             out.put("providerSeatCap", nd.getShareProviderSeatCap());
             out.put("providerCapPct", nd.getShareProviderCapPct());
+            out.put("minSeats", nd.getShareMinSeats());
             out.put("chronicWindowMinutes", nd.getChronicRateWindowMinutes());
             out.put("chronicMinSamples", nd.getChronicRateMinSamples());
             out.put("chronicSeatBlockRatio", nd.getChronicSeatBlockRatio());
@@ -1181,6 +1187,7 @@ public class AdminController {
         GatewayConfig.Defaults lsd = snap.config.getDefaults();
         out.put("providerSeatCap", Math.max(0, lsd.getShareProviderSeatCap()));
         out.put("providerCapPct", lsd.getShareProviderCapPct());
+        out.put("minSeats", Math.max(0, lsd.getShareMinSeats()));
         out.put("observedShareModels", expected.size());
         out.put("shareSamples", obs.samples());
         out.put("shareSamplesFromDb", obs.fromDb());
