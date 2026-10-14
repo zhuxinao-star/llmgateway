@@ -425,8 +425,15 @@ public class StatsDao {
      *  这一路只读库，让降权/撤席在重启后立刻恢复，不必重新撞墙才知道。
      *  隔离客户端（巡检/体检/确认探测）不算：它们不代表用户真实流量对额度的占用。 */
     public Map<String, long[]> chronicRateLimits(long sinceTs) {
+        // provider_id IS NOT NULL 是硬条件：网关侧直接拒绝的请求（缺 model、无候选、鉴权失败）
+        // 从未选路，落库时 provider 为空。它们不是"某家供应商被限流"的证据，混进来会在结果里
+        // 造出一个 null key，下游 Map.copyOf(null key) 直接抛 NPE（2026-10-14 实锤：一条脏行
+        // 把整条 60 秒快照调度打死，慢性层与运行态快照同时冻结 28 分钟）。
+        // '' 空串同样排掉：SQLite 里 '' IS NOT NULL 为真，只查 NULL 会漏进一个空 key。
         String sql = "SELECT provider_id, COUNT(*), SUM(CASE WHEN error_class='RATE_LIMIT' THEN 1 ELSE 0 END) " +
-                "FROM request_log WHERE ts >= ? AND (client IS NULL OR client NOT IN ('probe','selfcheck','reconcile')) " +
+                "FROM request_log WHERE ts >= ? AND provider_id IS NOT NULL " +
+                "AND provider_id <> '-' AND provider_id <> '' " +
+                "AND (client IS NULL OR client NOT IN ('probe','selfcheck','reconcile')) " +
                 "GROUP BY provider_id";
         Map<String, long[]> out = new HashMap<>();
         try {

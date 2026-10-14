@@ -94,6 +94,41 @@ public class UpstreamErrorClassifierTest {
         check("displayCn(RATE_LIMIT) 非空", true,
                 UpstreamErrorClassifier.displayCn(ErrorClass.RATE_LIMIT, "x") != null);
 
+        // 11. 展示层以库里已定案的 error_class 为准（displayStored）。
+        //     老写法只拿 raw 文本、http 传 null 重猜：分类当时知道状态码与请求上下文，事后重猜必输——
+        //     2026-10-14 实测出现过同一行 errorClass=CONTEXT_TOO_LONG 而页面显示"超时或流中断"的自相矛盾。
+        check("库里 CONTEXT_TOO_LONG + 文本像参数错 → 不许显示超时",
+                "上下文超长/参数不合法",
+                UpstreamErrorClassifier.displayStored("CONTEXT_TOO_LONG", "bad_request: model 字段缺失"));
+        check("库里定案优先于文本（RATE_LIMIT 配 timeout 字样仍说限流）",
+                true,
+                UpstreamErrorClassifier.displayStored("RATE_LIMIT", "upstream timeout-ish")
+                        .contains("触发限流"));
+        check("无 class 的旧行退回文本判定：429 文字 → 限流",
+                true,
+                UpstreamErrorClassifier.displayStored(null, "429 Too Many Requests") != null
+                        && UpstreamErrorClassifier.displayStored(null, "429 Too Many Requests")
+                        .contains("触发限流"));
+        check("空串 class 视同无 class",
+                UpstreamErrorClassifier.displayStored(null, "reach concurrency limit (64)"),
+                UpstreamErrorClassifier.displayStored("", "reach concurrency limit (64)"));
+        check("库里出现未知类名不硬崩：退回文本判定",
+                true,
+                UpstreamErrorClassifier.displayStored("SOMETHING_FUTURE", "stream timeout")
+                        .contains("超时或流中断"));
+        check("'-' 占位当无 class（旧数据/未落分类）",
+                true,
+                "-".equals("-")
+                        && UpstreamErrorClassifier.displayStored("-", "too many requests")
+                        .contains("触发限流"));
+        check("OTHER 给 null：前端回退显示原文",
+                null, UpstreamErrorClassifier.displayStored("OTHER", "some totally unknown thing"));
+        check("无 class 且无原文 → null（不许编一个原因出来）",
+                null, UpstreamErrorClassifier.displayStored(null, "  "));
+        check("只有 class 没有原文也照给文案",
+                "鉴权失败（API Key 无效或过期）",
+                UpstreamErrorClassifier.displayStored("AUTH", null));
+
         System.out.println();
         if (failures == 0) {
             System.out.println("=== ALL PASS ===");

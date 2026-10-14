@@ -140,6 +140,27 @@ public final class UpstreamErrorClassifier {
         }
     }
 
+    /** 以"库里已定案的 error_class"为准出中文（展示层的单一真源）。
+     *  分类落库时带着 http 状态与请求上下文，事后只拿 raw 文本重猜会丢这些信息：
+     *  曾出现同一行 error_class=CONTEXT_TOO_LONG、页面却显示"超时或流中断"（2026-10-14，
+     *  因为展示端调的是 classify(null, raw)，http 缺失时兜到 TIMEOUT）。
+     *  迁移前的老行没有 error_class（NULL/"-"），才退回按文本判。 */
+    public static String displayStored(String errorClass, String raw) {
+        ErrorClass ec = null;
+        if (errorClass != null && !errorClass.isBlank() && !"-".equals(errorClass)) {
+            try {
+                ec = ErrorClass.valueOf(errorClass.strip());
+            } catch (IllegalArgumentException ignore) {
+                ec = null;   // 未知类名不硬依赖枚举拼写，退回文本判定
+            }
+        }
+        if (ec == null) {
+            if (raw == null || raw.isBlank()) return null;
+            ec = classify(null, raw);
+        }
+        return displayCn(ec, raw);
+    }
+
     private static boolean containsAny(String low, String[] keys) {
         for (String k : keys) if (low.contains(k.toLowerCase())) return true;
         return false;

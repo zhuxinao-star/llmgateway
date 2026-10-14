@@ -273,6 +273,19 @@ public class AnthropicConverter {
         return out;
     }
 
+    /** 网关主动掐断一条已提交(200)的流时的收尾帧：先关掉所有未闭合块，再发 error 事件。
+     *  刻意**不**发 message_delta(stop_reason=end_turn)/message_stop：那等于把"中断"谎报成
+     *  "这轮答完了"，客户端就静默早停（2026-10-14 实测 3 发 amd/Qwen3.8-27B 被心跳掐断后
+     *  一个字节都没写，Claude Code 收到没有 message_stop 的半截流）。发 error 才能让客户端
+     *  明确报错/重试。置 finished 防重复收尾。 */
+    public static List<String> abortFrames(StreamState st, String message) {
+        List<String> out = new ArrayList<>(closeOpenBlocks(st));
+        st.finished = true;
+        out.add("event: error\ndata: " + Json.write(Json.obj("type", "error",
+                "error", Json.obj("type", "api_error", "message", message))) + "\n");
+        return out;
+    }
+
     /**
      * OpenAI SSE 行（data: {...} 或 data: [DONE]）→ Anthropic SSE 事件行列表。
      * 每条只含 "event: xxx\ndata: {...}\n"；SSE 事件分隔空行由写出方（AnthropicController）补齐

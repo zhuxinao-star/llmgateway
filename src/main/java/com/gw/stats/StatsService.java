@@ -112,14 +112,28 @@ public class StatsService {
         while (true) {
             try {
                 Thread.sleep(60_000);
-                policyService.refreshChronicRateLimits();   // 慢性限流读库刷新（重启后第一发就能认出长期撞墙的家）
-                policyService.persistSnapshot();
             } catch (InterruptedException e) {
                 return;
+            }
+            // 两件事各自一个 try：学习层读库失败不能连累运行态快照落盘，反之亦然。
+            // 此前共用一个 try，一次 NPE 就让 persistSnapshot 连续 28 分钟没跑（2026-10-14）。
+            try {
+                policyService.refreshChronicRateLimits();   // 慢性限流读库刷新（重启后第一发就能认出长期撞墙的家）
             } catch (Exception e) {
-                log.warn("运行时快照保存失败: {}", e.getMessage());
+                log.warn("慢性限流读库刷新失败: {}", describe(e));
+            }
+            try {
+                policyService.persistSnapshot();
+            } catch (Exception e) {
+                log.warn("运行时快照保存失败: {}", describe(e));
             }
         }
+    }
+
+    /** 只打 e.getMessage() 会把 NPE 打成 "失败: null"，人无法诊断——带上异常类名与首条栈帧 */
+    private static String describe(Exception e) {
+        StackTraceElement at = e.getStackTrace().length == 0 ? null : e.getStackTrace()[0];
+        return e.getClass().getSimpleName() + ": " + e.getMessage() + (at == null ? "" : " @ " + at);
     }
 
     private void cleanLoop() {

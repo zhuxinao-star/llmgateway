@@ -1368,7 +1368,7 @@ public class AdminController {
             v.put("profile", r.profile());
             v.put("client", r.client());
             v.put("error", r.error());
-            v.put("errorCn", translateError(r.error()));
+            v.put("errorCn", translateError(r.errorClass(), r.error()));
             v.put("compress", r.compress());
             v.put("traceId", r.traceId());
             v.put("httpStatus", r.httpStatus());
@@ -1412,7 +1412,7 @@ public class AdminController {
             v.put("tokensIn", r.tokensIn());
             v.put("tokensOut", r.tokensOut());
             v.put("error", r.error());
-            v.put("errorCn", translateError(r.error()));
+            v.put("errorCn", translateError(r.errorClass(), r.error()));
             // 终态标记：网关记账顺序决定"最后写入的一行"就是客户端最终拿到的结果行
             v.put("isFinal", i == rows.size() - 1);
             out.add(v);
@@ -1461,12 +1461,10 @@ public class AdminController {
         return out;
     }
 
-    /** 上游错误信息中文摘要：委托 #9 语义分类器的展示层（单一事实源，不再两处维护模式表）。
-     *  未命中返回 null（前端显示原文）。 */
-    private static String translateError(String raw) {
-        if (raw == null || raw.isBlank()) return null;
-        return com.gw.policy.UpstreamErrorClassifier.displayCn(
-                com.gw.policy.UpstreamErrorClassifier.classify(null, raw), raw);
+    /** 上游错误信息中文摘要：走分类器的"以库内 error_class 为准"入口（单一事实源，展示层
+     *  不再拿 raw 文本重猜、也不许把已定案的分类覆盖掉）。未命中返回 null（前端显示原文）。 */
+    private static String translateError(String errorClass, String raw) {
+        return com.gw.policy.UpstreamErrorClassifier.displayStored(errorClass, raw);
     }
 
     /** 日志过滤下拉选项（type = model_req | model_real | provider_id | client | status）。

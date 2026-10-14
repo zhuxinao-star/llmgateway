@@ -279,9 +279,17 @@ public class AdaptiveRateLimiter {
     private volatile long chronicStatsAt;
 
     /** 定期刷入（由 PolicyService 随快照调度调）：providerId → [真实流量样本数, 其中限流数]。
-     *  传 null/空 = 该层关闭（不做任何降权与撤席）。 */
+     *  传 null/空 = 该层关闭（不做任何降权与撤席）。
+     *  空 providerId 的条目丢弃：Map.copyOf 遇 null key 抛 NPE，而"没有供应商"的行（网关侧自拒）
+     *  本就不是任何一家的限流证据。这里兜一层，是为了让任何上游取数口径出问题时都打不死调度。 */
     public void setChronicStats(Map<String, long[]> stats, long atMs) {
-        this.chronicStats = stats == null || stats.isEmpty() ? Map.of() : Map.copyOf(stats);
+        Map<String, long[]> clean = new LinkedHashMap<>();
+        if (stats != null) {
+            stats.forEach((k, v) -> {
+                if (k != null && !k.isBlank() && v != null) clean.put(k, v);
+            });
+        }
+        this.chronicStats = clean.isEmpty() ? Map.of() : Map.copyOf(clean);
         this.chronicStatsAt = atMs;
     }
 
