@@ -213,13 +213,17 @@ public class ShareSeatFloorTest {
         }
     }
 
-    /** 盖一个"本进程实测出来的最近首字"（连环形窗与时间戳一起给，否则会被当成跨重启旧值重算） */
+    /** 盖一个"本进程实测出来的最近首字"（连环形窗、逐样本时刻与采样戳一起给，
+     *  否则会被当成跨重启旧值重算；3 条同值是判定门槛要求的最低证据条数）。 */
     static void measured(PolicyService.EntryRuntime er, long ttftMs) {
-        er.recentTtftWin = new long[]{ttftMs, ttftMs};
+        er.recentTtftWin = new long[]{ttftMs, ttftMs, ttftMs};
+        er.recentTtftTs = new long[er.recentTtftWin.length];
+        long now = System.currentTimeMillis();
+        java.util.Arrays.fill(er.recentTtftTs, now);
         er.recentTtftIdx = 0;
-        er.recentTtftCount = 2;
+        er.recentTtftCount = 3;
         er.recentTtftMedian = ttftMs;
-        er.medianTs = System.currentTimeMillis();
+        er.lastSpeedSampleTs = now;
         er.ttftSeeded = true;
     }
 

@@ -226,7 +226,7 @@
       <th class="sortable" onclick="sortLogs('provider')">供应商/真实模型<span class="sc" id="sc_provider"></span></th>
       <th class="sortable" onclick="sortLogs('key')" title="这一发实际用的哪把 Key（渠道）。空＝Key 归属功能上线之前的历史请求">Key<span class="sc" id="sc_key"></span></th>
       <th class="sortable" onclick="sortLogs('ttft')">TTFT<span class="sc" id="sc_ttft"></span></th>
-      <th class="sortable" onclick="sortLogs('total')">总耗时<span class="sc" id="sc_total"></span></th>
+      <th class="sortable" onclick="sortLogs('total')" title="这一发从网关接单到交付完的总时长，与 TTFT 同一把钟（故恒 ≥ TTFT）。2026-10-16 之前的流式行是从「开始转发」起算的，会比 TTFT 短，那些行已标成「旧口径」">总耗时<span class="sc" id="sc_total"></span></th>
       <th class="sortable" onclick="sortLogs('tokens')">tokens<span class="sc" id="sc_tokens"></span></th>
       <th class="sortable" onclick="sortLogs('status')">状态<span class="sc" id="sc_status"></span></th>
       <th class="sortable" onclick="sortLogs('attempts')">尝试<span class="sc" id="sc_attempts"></span></th>
@@ -264,7 +264,7 @@
       <button class="btn" onclick="setStrategy(this)">保存并生效</button>
     </div>
     <div class="toolbar" style="margin-top:10px;padding-top:8px;border-top:1px dashed rgba(128,128,128,.35)">
-      <span class="dim" style="font-size:12px">速带分摊（auto/priority/free-only 生效）：<b style="color:#cfe3ff">速度只决定"谁先入座"，不决定"一共几个座"</b>（绝对慢阈值 + 与本组最快的并列带排队，带内不足席位下限就按实测首字从带外补席），<b style="color:#cfe3ff">进席后的份额按偏好分</b>（人工权重/优先级/费用档/健康/限流——两个速度因子都已从份额里除掉），再过一道供应商封顶</span>
+      <span class="dim" style="font-size:12px">速带分摊（auto/priority/free-only 生效）：<b style="color:#cfe3ff">速度只决定"谁先入座"，不决定"一共几个座"</b>（绝对慢阈值 + 与本组最快的并列带排队，带内不足席位下限就按实测首字从带外补席；<b style="color:#cfe3ff">只有"新鲜实测"才参与判慢</b>，旧值过期＝无有效实测，改占探索测量席去取一次真实样本），<b style="color:#cfe3ff">进席后的份额按偏好分</b>（人工权重/优先级/费用档/健康/限流——两个速度因子都已从份额里除掉），再过一道供应商封顶</span>
     </div>
     <div class="toolbar" style="margin-top:6px">
       <button class="btn ghost" id="lsBtn" onclick="toggleLoadShare(this)">读取中</button>
@@ -278,6 +278,15 @@
       <input id="lsMinSeats" type="number" min="0" max="10" step="1" style="width:64px" placeholder="默认 3">
       <button class="btn mini ghost" onclick="saveLoadShareParams(this)">保存参数</button>
       <span id="lsHint" class="dim" style="font-size:12px"></span>
+    </div>
+    <div class="toolbar" style="margin-top:6px">
+      <span class="dim" style="font-size:12px">测量新鲜度（旧实测过期＝「无有效实测」，不再当成"它慢"）：</span>
+      <span class="dim" style="font-size:12px" title="逐条样本按这个时长过滤：路由读的首字中位数只用「保鲜期窗内」的样本算（环窗按条数滚动，很久以前的尖峰自己出窗，不再替今天判死刑）。窗内一条都不剩、或不够凑出中位数（默认 3 条）时都判为「证据不足」：既不判慢、也不替全组决定并列带画在哪，而是转成探索测量席的候选去取一次真实样本。0＝关闭逐条过滤（整窗旧值永久有效＝改造前的行为，会把模型永久钉在撤席线外）">样本保鲜期(小时)</span>
+      <input id="lsSpeedAge" type="number" min="0" max="8760" step="1" style="width:76px" placeholder="默认 72">
+      <span class="dim" style="font-size:12px" title="抽签席被高分家占满后，再给「没有有效实测」的家另开几席（从没测过的排最前，其次按样本新旧）。补的仍然只是席位——份额照旧按偏好分，不因为它没测过就多分或少分；限流/慢性限流/同家席位封顶这些硬门槛照样挡。0＝关闭（回到"没进席＝它慢"的旧读法）">探索测量席(家)</span>
+      <input id="lsExplore" type="number" min="0" max="3" step="1" style="width:64px" placeholder="默认 1">
+      <button class="btn mini ghost" onclick="saveLoadShareParams(this)">保存新鲜度参数</button>
+      <span id="lsFreshHint" class="dim" style="font-size:12px"></span>
     </div>
     <div class="toolbar" style="margin-top:6px">
       <span class="dim" style="font-size:12px">慢性限流（读请求日志长窗口，重启不丢）：</span>
@@ -308,8 +317,9 @@
   </div>
   <div class="card">
     <h3>运行时状态（熔断 / 冷却 / EWMA）</h3>
-    <table><thead><tr><th>供应商</th><th>模型</th><th>状态</th><th>首字延迟</th><th title="最近首字中位数（抗尖峰，选举主要看这个）">中位首字</th><th>出字速度</th><th>连续失败</th><th>最近错误</th></tr></thead>
+    <table><thead><tr><th>供应商</th><th>模型</th><th>状态</th><th>首字延迟</th><th title="最近首字中位数（环窗全量，含已过保鲜期的旧样本；只作历史展示，判定不读它）">中位首字</th><th title="路由本次真正读的那个首字：保鲜期窗内样本的中位数（窗内不足判定条数就空着＝不判快慢）">判定首字</th><th title="路由判快慢只认保鲜期窗内的实测：过期/样本不足/从没测过都不判慢（改占探索测量席去取样本），旧值不当证据用">速度证据</th><th title="出字速度（tokens/秒）。分母只取「首字之后还在出活」那段：预填充/排队已经由首字延迟罚过一次，再算进吞吐就是连乘两次。缓冲回来的响应（非流式）没有逐字窗口，按整窗记，这是测量极限不是口径错误。2026-10-16 起口径统一，重启后随新流量逐步刷新">出字速度</th><th>连续失败</th><th>最近错误</th></tr></thead>
     <tbody id="runtimeBody"></tbody></table>
+    <div class="dim" id="speedColsHint" style="font-size:12px;margin-top:6px;line-height:1.6"></div>
   </div>
   <div class="card" id="earlyStopCard" style="display:none">
     <h3>早停惩罚中（client×模型被临时降权）</h3>
@@ -1199,9 +1209,42 @@ function renderGroups() {
       <button class="btn mini err" data-hact="gDel" data-h="${hx({g})}">删</button></td></tr>`);
   }
 }
+/** 速度证据三态恒显（路由判快慢只认保鲜期窗内的实测）：
+ *  「实测已过期」「窗内样本不够」「从没测过」都不判慢、也不替全组决定并列带画在哪，
+ *  而是占探索测量席取一次真实样本；体检（probe）中位只用于判定"该不该给它花用户的真实请求"，
+ *  永不进评分与份额，所以单独注明。
+ *  条数必须恒显：同一个「旧实测」标签背后是两种完全不同的处置（等它自己过期掉 vs 去查为什么没流量）。 */
+function speedEvidenceCell(e, min) {
+  const st = e.speedState || 'UNKNOWN';
+  const need = min > 0 ? '，判快慢要 ≥' + min + ' 条' : '';
+  const tip = `保鲜期窗内还有几条真实首字样本（环窗共 ${e.speedWindow || 8} 格）。判定读的是这些样本的中位数，过期样本逐条剔掉、不参与今天的判定`;
+  const cnt = `<span class="dim" style="font-size:11px" title="${tip}"> · 窗内 ${e.freshSamples == null ? '?' : e.freshSamples} 条${need}</span>`;
+  const probe = e.probeTtftMedian != null
+    ? `<span class="dim" style="font-size:11px"> · 体检 ${e.probeTtftMedian}ms（只判定不进评分）</span>` : '';
+  if (st === 'MEASURED') return `<span style="color:#8fe3a8">新鲜实测</span>${cnt}`;
+  if (st === 'STALE') {
+    const age = e.speedAgeHours == null ? '来源时刻未知'
+      : (e.speedAgeHours >= 24 ? Math.round(e.speedAgeHours / 24) + ' 天前' : Math.round(e.speedAgeHours) + ' 小时前');
+    const n = e.freshSamples == null ? 0 : e.freshSamples;
+    // 窗里还有样本却判 STALE＝条数不够（1~2 条的中位数没有尖峰免疫），不是"值老了"。
+    // 条数已经写进主文案的两条分支，后面不再重复挂一遍"窗内 n 条"——同一列说两遍等于没说
+    if (n > 0) return `<span style="color:#ffcf7f" title="${tip}">样本不足（窗内 ${n} 条${need}）</span>${probe}`;
+    return `<span style="color:#ffcf7f" title="${tip}">实测已过期（${age}）</span>${probe}`;
+  }
+  return `<span style="color:#9fb6d4" title="${tip}">从没测过</span>${probe}`;
+}
 function renderRuntime() {
   const tb = $('#runtimeBody'); tb.innerHTML = '';
   const now = Date.now();
+  const sMin = (ov.runtime && ov.runtime.speedSampleMin) || 0;
+  const hint = $('#speedColsHint');
+  if (hint) hint.innerHTML = `<b style="color:#cfe3ff">中位首字</b>是环窗全量（含已过保鲜期的旧样本，只作历史），`
+    + `<b style="color:#cfe3ff">判定首字</b>才是路由本次读的那个数＝保鲜期窗内样本的中位数。`
+    + `窗内不足 ${sMin || '?'} 条时判定首字为空：一两条样本里一条尖峰就占掉一半以上证据，那样的"中位数"没有尖峰免疫，不配判慢`
+    + `——这一家按"速度未知"继续拿量，攒够样本后自动恢复判定。`
+    + `<b style="color:#ffcf7f">网关刚重启时这一列会整片显示"实测已过期"</b>：快照只带回一个中位数、不带每条样本的时刻，`
+    + `要等这家被真实请求排到一次，才向请求日志按保鲜期重算环窗（重启不丢观测，也不拿旧值判慢）。`
+    + `<b style="color:#cfe3ff">出字速度</b>的分母只取「首字之后还在出活」那段——预填充已经由首字罚过一次，不再进吞吐分母罚第二遍。`;
   for (const e of (ov.runtime?.entries) || []) {
     // #15 熔断倒计时：OPEN 时把剩余冷却秒数直接显示在状态标签旁（轮询自然刷新，无需额外定时器）
     const remain = e.coolDownUntil ? e.coolDownUntil - now : 0;
@@ -1211,8 +1254,9 @@ function renderRuntime() {
       : e.state === 'OPEN' ? '<span class="tag err">熔断</span>'
       : '<span class="tag warn">半开</span>') + cd;
     const tps = e.ewmaTokensPerSec != null ? e.ewmaTokensPerSec + ' tok/s' : '—';
+    const fresh = e.speedState === 'MEASURED';
     ap(tb, `<tr><td>${esc(e.provider)}</td><td>${esc(e.model)}</td><td>${st}</td>
-      <td>${fmt(e.ewmaTtftMs)}</td><td>${fmt(e.recentTtftMedian)}</td><td class="dim">${tps}</td><td>${e.consecutiveFailures}</td><td class="dim" style="max-width:260px;overflow:hidden;text-overflow:ellipsis" title="${esc(e.lastError ?? '')}">${esc(e.lastError ?? '')}</td></tr>`);
+      <td>${fmt(e.ewmaTtftMs)}</td><td${fresh ? '' : ' class="dim" title="环窗全量中位（含已过保鲜期的旧样本）：只作历史展示，判定读的是右边「判定首字」那一列"'}>${fmt(e.recentTtftMedian)}</td><td>${fmt(e.judgedTtftMs)}</td><td>${speedEvidenceCell(e, (ov.runtime && ov.runtime.speedSampleMin) || 0)}</td><td class="dim">${tps}</td><td>${e.consecutiveFailures}</td><td class="dim" style="max-width:260px;overflow:hidden;text-overflow:ellipsis" title="${esc(e.lastError ?? '')}">${esc(e.lastError ?? '')}</td></tr>`);
   }
   renderEarlyStop();
   renderClientQueue();
@@ -2123,10 +2167,16 @@ async function loadLogs() {
       ? `<span class="tag" style="font-size:11px" title="上下文压缩路径：${esc(r.compress)}">${esc(compressCn(r.compress))}</span>` : '';
     const profTag = r.profile ? `<span class="dim" style="font-size:11px" title="工具自报画像 X-Gateway-Profile">${esc(r.profile)}</span>` : '';
     const ev = (compTag || profTag) ? `${compTag}${compTag && profTag ? ' ' : ''}${profTag}` : '<span class="dim">—</span>';
+    // 总耗时比 TTFT 还短＝这行写于 2026-10-16 口径修正之前（流式当时从"开始转发"起算，漏了上游首字等待）。
+    // 旧数据不改写，但必须标出来：否则读日志的人会拿它去算速度，或以为网关还在算错。
+    const oldCaliber = r.ttftMs != null && r.totalMs != null && r.totalMs < r.ttftMs;
+    const totalCell = oldCaliber
+      ? `<td style="color:#ffcf7f" title="旧口径写入：这行的「总耗时」只算了转发给客户端那段，没含上游首字等待，所以比 TTFT 还短。改口径后的新请求不会再出现，历史行保持原样不重写">${fmt(r.totalMs)} <span style="font-size:11px">旧口径</span></td>`
+      : `<td>${fmt(r.totalMs)}</td>`;
     buf.push(`<tr><td>${r.time}</td><td>${esc(r.client || '-')}</td><td>${esc(r.model)}</td>
       <td class="dim">${esc(r.provider ?? '')} ${esc(r.realModel ?? '')}</td>
       <td class="dim" title="${r.channelId ? '渠道 id：' + esc(r.channelId) : 'Key 归属功能上线前的历史请求，无法判断用的哪把 Key'}">${esc(r.channelId || '—')}</td>
-      <td>${fmt(r.ttftMs)}</td><td>${fmt(r.totalMs)}</td><td class="dim">${r.tokensIn||0}+${r.tokensOut||0}</td>
+      <td>${fmt(r.ttftMs)}</td>${totalCell}<td class="dim">${r.tokensIn||0}+${r.tokensOut||0}</td>
       <td><span class="tag ${cls}">${esc(ST_CN[r.status] || r.status)}</span>${ec}${hs}</td><td>${r.attempts || 1}</td>
       <td class="dim" style="max-width:220px;overflow:hidden;text-overflow:ellipsis" title="${esc(r.error ?? '')}">${esc(r.errorCn || r.error || '')}</td>
       <td>${link}</td><td>${ev}</td></tr>`);
@@ -2424,7 +2474,7 @@ async function setStrategy(btn) {
     await loadAll();
   }, false);
 }
-// ---- 速带分摊（loadShare）：开关 + 带宽/慢阈值/并列带倍率/席位下限 + 慢性限流三参数 + 供应商两条封顶，保存即实时生效并落盘 ----
+// ---- 速带分摊（loadShare）：开关 + 带宽/慢阈值/并列带倍率/席位下限 + 测量新鲜度两参数 + 慢性限流三参数 + 供应商两条封顶，保存即实时生效并落盘 ----
 async function loadLoadShare() {
   const btn = $('#lsBtn');
   try {
@@ -2435,6 +2485,8 @@ async function loadLoadShare() {
     $('#lsSlow').value = r.slowTtftMs;
     $('#lsTie').value = r.speedTieRatio;
     $('#lsMinSeats').value = r.minSeats;
+    $('#lsSpeedAge').value = r.speedMaxAgeHours;
+    $('#lsExplore').value = r.exploreSeats;
     $('#lsCWin').value = r.chronicWindowMinutes;
     $('#lsCMin').value = r.chronicMinSamples;
     $('#lsCRatio').value = r.chronicSeatBlockRatio;
@@ -2452,6 +2504,19 @@ async function loadLoadShare() {
       }
     }
     loadChronicHint();
+    const fh = $('#lsFreshHint');
+    if (fh) {
+      const age = r.speedMaxAgeHours;
+      const cnt = (t.fresh || 0) + (t.stale || 0) + (t.unknown || 0);
+      if (!cnt) fh.textContent = '暂无模型的速度记录';
+      else fh.innerHTML = `速度证据：<span style="color:#8fe3a8">新鲜 ${t.fresh || 0}</span> · `
+        + `<span style="color:#ffcf7f">证据不足 ${t.stale || 0}</span> · `
+        + `<span style="color:#9fb6d4">从没测过 ${t.unknown || 0}</span>`
+        + `（${age > 0 ? '保鲜 ' + age + ' 小时，逐条过滤窗内样本' : '保鲜期已关闭：旧实测永久有效，过期值照样判慢'}）`
+        + ` · 后两类都<b>不判慢</b>${(r.exploreSeats || 0) === 0
+          ? '，但探索测量席已关闭（0 家），它们只能待在席外'
+          : `，另开 ${r.exploreSeats} 个探索测量席取一次真实样本——席位不够分的仍排在席外，只是不再被当成"慢"`}`;
+    }
   } catch (e) {
     // 同 discBtn：启动瞬失败要给可见态，不然按钮永远停在"读取中"
     if (btn) { btn.textContent = '读取失败（点击重试）'; btn.className = 'btn ghost'; }
@@ -2494,6 +2559,8 @@ async function saveLoadShareParams(btn) {
   const slow = parseInt($('#lsSlow').value, 10);
   const tie = parseFloat($('#lsTie').value);
   const minSeats = parseInt($('#lsMinSeats').value, 10);
+  const speedAge = parseInt($('#lsSpeedAge').value, 10);
+  const explore = parseInt($('#lsExplore').value, 10);
   const cWin = parseInt($('#lsCWin').value, 10);
   const cMin = parseInt($('#lsCMin').value, 10);
   const cRatio = parseFloat($('#lsCRatio').value);
@@ -2503,6 +2570,8 @@ async function saveLoadShareParams(btn) {
   if (!(slow >= 1000 && slow <= 60000)) { toast('慢阈值需 1000~60000ms', true); return; }
   if (!(tie >= 1 && tie <= 20)) { toast('并列带倍率需 1~20（1=速度一有差就分份额）', true); return; }
   if (!(minSeats >= 0 && minSeats <= 10)) { toast('席位下限需 0~10（0＝关闭，退回速度说了算）', true); return; }
+  if (!(speedAge >= 0 && speedAge <= 8760)) { toast('样本保鲜期需 0~8760 小时（0＝关闭过期判定，旧实测永久有效）', true); return; }
+  if (!(explore >= 0 && explore <= 3)) { toast('探索测量席需 0~3 家（0＝关闭：没被测过的家只能待在席外）', true); return; }
   if (!(cWin >= 0 && cWin <= 1440)) { toast('慢性窗口需 0~1440 分钟（0=关闭）', true); return; }
   if (!(cMin >= 3 && cMin <= 100)) { toast('慢性最少样本需 3~100', true); return; }
   if (!(cRatio >= 0.05 && cRatio <= 1)) { toast('撤席线需 0.05~1（429 占比）', true); return; }
@@ -2511,6 +2580,7 @@ async function saveLoadShareParams(btn) {
   await withBusy(btn, '保存中…', async () => {
     await api('/api/load-share', 'PUT', {
       bandSize: band, slowTtftMs: slow, speedTieRatio: tie, minSeats: minSeats,
+      speedMaxAgeHours: speedAge, exploreSeats: explore,
       chronicWindowMinutes: cWin, chronicMinSamples: cMin, chronicSeatBlockRatio: cRatio,
       providerSeatCap: seatCap, providerCapPct: capPct,
     });
@@ -2543,7 +2613,7 @@ const FACTOR_CN = {
   H_health:      ['健康度',    '熔断/连续失败惩罚：连续失败越多越接近 0'],
   Q_quality:     ['质量',      '输出质量综合惩罚（早停、空回、非法工具等）'],
   S_ttft:        ['首字速度',  '实测首字延迟中位数平滑映射，越快越接近 1'],
-  T_throughput:  ['出字速度',  'EWMA 出字吞吐'],
+  T_throughput:  ['出字速度',  'EWMA 出字吞吐（分母只取首字之后的出字窗口，不含预填充）'],
   C_costTier:    ['费用档',    'free/low/standard/premium 的相对花费'],
   K_category:    ['场景匹配',  '请求类别与该模型擅长场景的匹配度'],
   CS_codeScore:  ['代码能力',  '模型代码能力分（写码/工具类请求权重更高）'],
@@ -2553,7 +2623,7 @@ const FACTOR_CN = {
   TW_toolWeak:   ['工具弱',    '带 tools 请求打到"从不回 tool_calls"的模型时降权'],
   ES_earlyStop:  ['早停嫌疑',  '该来源工具在此模型上近期早停，会话级临时降权'],
 };
-const DIAG_CN = { ttftEstMs:'实测中位首字', priority:'配置优先级', consecutiveFailures:'连续失败', qualityIssues:'质量问题',
+const DIAG_CN = { ttftEstMs:'实测中位首字（只认保鲜期内的样本）', priority:'配置优先级', consecutiveFailures:'连续失败', qualityIssues:'质量问题',
   rateLimits5m:'该家近5分钟撞墙', learnedReqPerMin:'该家学到的额度(次/分)' };
 const REASON_CN = {
   CHANNEL_DISABLED:  ['渠道已停用', '这条渠道（Key 池）在配置里是关的，压根没参与评分'],
@@ -2658,6 +2728,12 @@ function rankPanelHtml(t, scope) {
       + (t.seatFloor ? ` · 席位下限 ${t.seatFloor} 家（带内不足时按实测首字从带外补席）` : ' · 无席位下限（带内几家算几家）')
       + (t.seatsStrict ? ` · <b style="color:#cfe3ff">本轮 ${t.seatsStrict} 家带内</b>`
         + (t.seatsRelaxed ? `＋${t.seatsRelaxed} 家放宽补席` : '（无需补席）') : '')
+      + (t.speedSampleMaxAgeHours
+        ? ` · 只认 ${t.speedSampleMaxAgeHours} 小时内的实测，且窗内要攒够 ${t.speedSampleMin || 3} 条才判快慢（不够＝证据不足，不判慢）`
+        : ' · 保鲜期已关闭（旧实测永久有效）')
+      + (t.exploreSeats
+        ? ` · 探索测量席 ${t.exploreSeats} 家${t.seatsExplore ? `（<b style="color:#cfe3ff">本轮补了 ${t.seatsExplore} 家</b>：没有有效实测不等于慢）` : '（本轮无需探索：席内都有新鲜实测）'}`
+        : ' · 探索测量席已关闭')
       + '）'
     : `分摊 <b style="color:var(--err)">关</b>（直接取分数首位，不抽签）`);
   meta.push(`参与评分 <b>${rows.length}</b> · 门控出局 <b>${flt.length}</b>`);
@@ -2673,10 +2749,19 @@ function rankPanelHtml(t, scope) {
   rows.forEach((r, i) => {
     const stt = STATE_CN[r.state] || [r.state || '', ''];
     const w = Math.max(2, Math.round(100 * (r.score || 0) / max));
+    // 速度证据恒显：过期/没测过与"慢"是完全不同的问题，只在说明文字里出现等于没有
+    // STALE 有两条来路，处置动作不同，必须在标签上分开：整窗过期（窗内 0 条）vs 窗内样本凑不出中位数
+    const spTag = r.speedState === 'STALE'
+      ? (r.speedSamples === 0
+          ? `<span class="tag warn" title="保鲜期（${t.speedSampleMaxAgeHours} 小时）内一条实测都没有——上次实测在${r.speedAgeHours == null ? '来源时刻未知' : Math.round(r.speedAgeHours * 10) / 10 + ' 小时前'}：本轮它不判慢、也不替全组决定并列带，等真实流量重新采样">旧实测</span>`
+          : `<span class="tag warn" title="保鲜期内只有 ${r.speedSamples < 0 ? '不到' : r.speedSamples + ' 条，不到'}判定所需的 ${t.speedSampleMin || 3} 条：中位数要过半样本可比才有意义，一两条会被单次尖峰占掉一半证据。本轮不判慢、也不替全组画带，继续拿量直到攒够">样本不足</span>`)
+      : r.speedState === 'UNKNOWN'
+        ? '<span class="tag" title="从没拿到过有效实测：本轮不判它快也不判它慢，该占探索测量席取一次真实样本">没测过</span>'
+        : '';
     cell.push(`<tr${r.picked ? ' style="font-weight:600"' : ''}>
       <td class="dim">${i + 1}</td>
       <td>${esc(r.provider)}/${esc(r.model)}${r.channel ? ` <span class="dim">@${esc(r.channel)}</span>` : ''}
-        ${r.picked ? ' <span class="tag ok">主选</span>' : ''}${r.inBand ? ' <span class="tag" style="border-color:var(--accent);color:var(--accent)" title="进入本次分摊抽签席">席</span>' : ''}</td>
+        ${r.picked ? ' <span class="tag ok">主选</span>' : ''}${r.inBand ? ' <span class="tag" style="border-color:var(--accent);color:var(--accent)" title="进入本次分摊抽签席">席</span>' : ''}${spTag}</td>
       <td><div style="display:flex;align-items:center;gap:6px"><span class="sbar${r.picked ? ' pick' : ''}"><i style="width:${w}%"></i></span>
         <span class="dim" style="font-size:12px">${r.score}</span></div></td>
       <td>${stt[0] ? `<span class="tag ${stt[1] || 'ok'}">${esc(stt[0])}</span>` : ''}</td>
@@ -2684,7 +2769,7 @@ function rankPanelHtml(t, scope) {
       <td class="dim" style="font-size:12px;white-space:normal">${esc(r.note || '')}</td>
       <td>${r.factors ? `<button class="btn mini ghost" onclick="tgRankF('${scope}',${i},this)">因子</button>` : '<span class="dim">—</span>'}</td></tr>`);
     cell.push(`<tr id="rkf-${scope}-${i}" style="display:none"><td></td><td colspan="6" style="background:var(--bg)">
-      <div style="line-height:1.9">${rkFactorsHtml(r.factors)}</div></td></tr>`);
+      <div style="line-height:1.9">${rkFactorsHtml(r.factors, r)}</div></td></tr>`);
   });
   html += `<table style="width:100%"><thead><tr class="dim" style="font-size:12px">
     <th>#</th><th>渠道</th><th>综合分（条长=相对最高分）</th><th>状态</th><th>应得份额</th><th>说明</th><th></th>
@@ -2702,7 +2787,7 @@ function rankPanelHtml(t, scope) {
   }
   return html;
 }
-function rkFactorsHtml(f) {
+function rkFactorsHtml(f, r) {
   if (!f) return '<span class="dim">未记录因子</span>';
   const chips = [];
   Object.entries(FACTOR_CN).forEach(([k, cn]) => {
@@ -2712,7 +2797,12 @@ function rkFactorsHtml(f) {
       ${esc(cn[0])} <b>${val}</b></span>`);
   });
   // 诊断值各自带单位；"0" 在限流这两项里含义是"没学到/没撞过"，不能光秃秃显示 0
-  const diagVal = (k, x) => k === 'ttftEstMs' ? x + 'ms'
+  // ttftEstMs=-1 是"没有新鲜实测"（从没测过 / 旧值过期 / 窗内样本凑不出中位数），不是"0ms 快到头"——两者在处置上完全相反
+  const diagVal = (k, x) => k === 'ttftEstMs'
+    ? (x < 0 ? (r && r.speedState === 'UNKNOWN' ? '无有效实测（从没测过）'
+        : r && r.speedSamples > 0 ? `无有效实测（保鲜期窗内只 ${r.speedSamples} 条，凑不出中位数）`
+        : '无有效实测（旧值过期' + (r && r.speedAgeHours != null ? ' ' + Math.round(r.speedAgeHours * 10) / 10 + ' 小时前' : '') + '）')
+        : x + 'ms')
     : k === 'learnedReqPerMin' ? (x > 0 ? x + ' 次/分' : '未学到')
     : k === 'rateLimits5m' ? (x > 0 ? x + ' 次' : '没撞过') : x;
   const diag = Object.entries(DIAG_CN).map(([k, cn]) =>
@@ -2813,6 +2903,7 @@ const BAND_CN = {
   BAND_CHRONIC_LIMIT: ['长期撞限流', '长窗口（默认 60 分钟）真实流量里 429 占比超过 chronicSeatBlockRatio，且样本量够（≥chronicRateMinSamples）→ 不占席。这一层读库，重启不会失忆；爆发检测器只管"此刻在撞"，这里管"一直在撞"'],
   BAND_PROVIDER_SEATS: ['同家席位已满', '这一家已经有 shareProviderSeatCap 个模型占席（默认 2），同家的其它模型不再占抽签席——席位按模型去重，一家高分模型多就会成倍吃掉席。它仍留在兜底顺序里，别家挂了照样接'],
   BAND_NO_SEAT:    ['分数排在席外', '分数排在席位数上限（shareBandSize）之外，或该模型已有别的 Key 占了席'],
+  BAND_PROBE_SLOW: ['体检已证明慢', '本轮没有新鲜真实流量可判（从没测过或旧值过期），但巡检体检的首字中位已慢过绝对门槛 → 不占探索测量席。探索席花的是用户的真实请求，体检免费测出来的"慢"不该再拿用户请求去试第二次；它仍留在兜底顺序里'],
 };
 
 /** 把模型级行按<b>供应商</b>加总实际占比：封顶线画在"家"这一层，而模型级表会把

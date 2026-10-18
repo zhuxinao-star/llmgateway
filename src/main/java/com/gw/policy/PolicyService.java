@@ -41,10 +41,23 @@ public class PolicyService {
      *  历史坑：流式路径曾从中继起表才计时，把走 SSE 的家（Claude Code 全部流量）首字记成 0~3ms，
      *  速度中位数被压到真实值的几十分之一，分摊份额直接失真（lingxiongkeji 曾独占 43%）。 */
     private static final long TTFT_ARTIFACT_FLOOR_MS = 50;
-    /** 恢复的"最近实测中位数"保鲜期（ms）：过期就重新从请求日志回填。
-     *  没有这条，一次陈旧慢值会被永久复用——BAND_SLOW 踢出席 → 拿不到新样本 → 永远翻不了身
-     *  （agnes/stepfun 实测探测 300~600ms，库里还挂着 10~14s 的旧值就是这么锁死的）。 */
-    private static final long RESTORED_MEDIAN_FRESH_MS = 3 * 3600_000L;
+    /** 实测速度样本的"可用状态"三态——「从未测量」「有过测量但证据不可用于判现在」是两件不同的事，
+     *  必须分开，不能都缩成一个数字。旧实现把过期值当最新实测用，等于让十七天前的一次同秒压测
+     *  排队替今天判死刑（agnes：库里挂 12727ms，体检实测 583ms，界面上看不出差别）。
+     *  只有 MEASURED 参与判慢；STALE/UNKNOWN 一律按"无有效实测"走中性档（速度未知 ≠ 速度很慢）。
+     *  STALE 涵盖两种"有测量但当下判不了"：窗内一条样本都没有（全过期/来源时刻追不到），
+     *  以及窗内样本凑不出一个中位数（少于 MIN_JUDGMENT_SAMPLES 条）。 */
+    enum SpeedState { MEASURED, STALE, UNKNOWN }
+    /** 判定"典型首字速度"所需的保鲜期内样本条数下限。
+     *  为什么是 3 而不是 2：中位数要真的落在"中间"才有尖峰免疫——只有 2 条时它是两数的均值，
+     *  一发排队尖峰就占掉一半证据（agnes 2026-10-16 的现场：448ms 与昨日 11771ms 求均值＝6109ms，
+     *  比并列带门槛 3321ms 高，于是"一条尖峰 + 一条好样本"就把一家钉出抽签席，
+     *  出局→没流量→样本停在 2 条→再也翻不了页，和鬼值闭环是同一个自锁形状）。
+     *  3 条起才有"过半样本比这慢"的含义；不足 3 条按证据不足处理，继续拿量直到攒够（能自愈）。 */
+    private static final int MIN_JUDGMENT_SAMPLES = 3;
+    /** 算吞吐（tokens/秒）时认这段"首字之后的出字窗口"的最小长度（ms）。
+     *  短于它就认定这次响应是缓冲回来的（非流式没有逐字窗口），退回整窗，别拿 3ms 除 200 token 得出离谱速率。 */
+    private static final int MIN_GENERATION_WINDOW_MS = 250;
     /** 分摊速度并列带的最小绝对余量（ms）：慢门槛取 max(最快×shareSpeedTieRatio, 最快+此值)。
      *  纯按倍数会在"最快只要 300ms"时把 1s 的正常模型也踢出席——300ms 与 1s 是"相差不是很大"。 */
     private static final long SHARE_TIE_MIN_SPREAD_MS = 3000;
@@ -61,6 +74,7 @@ public class PolicyService {
     public static final String BAND_REL_SLOW = "BAND_REL_SLOW";        // 比本组最快候选慢出并列带（"相差很大"）
     public static final String BAND_CHRONIC_LIMIT = "BAND_CHRONIC_LIMIT"; // 长期 429 比例高（读库，重启不丢）
     public static final String BAND_PROVIDER_SEATS = "BAND_PROVIDER_SEATS"; // 一家占满 shareProviderSeatCap 席后，同家其它模型不再占席
+    public static final String BAND_PROBE_SLOW = "BAND_PROBE_SLOW";  // 只有体检（probe）证据且已慢过绝对门槛 → 不配占用探索测量席
     public static final String BAND_NO_SEAT = "BAND_NO_SEAT";          // 分数排在席外（席位数上限）
     private final ConcurrentHashMap<String, AtomicInteger> inflightEntry = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicInteger> inflightProvider = new ConcurrentHashMap<>();
@@ -185,12 +199,22 @@ public class PolicyService {
         // 中位数抗尖峰：几条快样本就能把尖峰的痕迹挤出中位 → recentTtftMedian。-1=无中位数样本。
         public volatile double recentTtftMedian = -1;
         volatile boolean ttftSeeded;                      // 本进程是否已尝试从日志回填历史最近样本（只查一次库）
-        // 中位数最近一次"被真实样本算出来"的时刻（ms epoch）。跨重启恢复的中位数没有这个时间就会
-        // 永远是"上次的值"——模型今天 300ms、上周被塞了个 20s 样本，中位数赖着不走，BAND_SLOW 就永久饿死它。
-        volatile long medianTs;
+        // 最近一个"被采纳的首字样本"发生在什么时刻（ms epoch）。0＝不知道。
+        // 这是判新鲜度的唯一依据：跨重启从快照恢复的中位数没有它（快照里根本没存采样时刻），
+        // 所以恢复值一律先当"过期"处理，由 ensureRecentTtft 带时间界地向请求日志重算——
+        // 若把快照写入时刻当成采样时刻，每 60 秒重写一次快照就等于样本永远新鲜（2026-10-14 的实锤）。
+        volatile long lastSpeedSampleTs;
+        // 体检（client=probe）的首字中位数与采样时刻：只用于"判定"，永不进分数/并列带/份额。
+        //  真实流量缺席的家靠它分辨"确实慢"（不配花用户请求去试）与"没被测过"（该给它一发探索席）。
+        volatile double probeTtftMedianMs = -1;
+        volatile long probeSampleTs;
         // 配置/上游给的真实模型名（键已小写归一，界面仍显示原名，别让用户看见对不上的小写）
         volatile String displayName;
         long[] recentTtftWin;                             // 最近 TTFT 环形窗（仅在 synchronized(er) 内读写）
+        // 与 recentTtftWin 一格一条的"这条样本发生在什么时候"。有了它，"最近 8 条"才升级为
+        // "保鲜期内的最近 8 条"：判定读中位数时逐条按时间过滤，旧尖峰自己出窗，不再靠一条新样本
+        // 把整窗旧值洗白（见 freshTtftMedian）。0＝这一格没样本。
+        long[] recentTtftTs;
         int recentTtftIdx = 0;
         int recentTtftCount = 0;
     }
@@ -284,6 +308,7 @@ public class PolicyService {
                              String requestCategory, Integer inputTokens, boolean hasTools, String client,
                              RankTrace out) {
         GatewayConfig.Defaults d = configService.snapshot().config.getDefaults();
+        final long speedAgeMs = speedMaxAgeMs(d);   // 首字样本保鲜期（ms，0=关闭过期判定），本次决策统一用这一个口径
         // 预览（评分沙盘）绝不能改变运行态：半开探测槽位一次只能被一个真实请求占用，
         // 若沙盘把槽位抢了，真正的恢复探测就被推迟——预览只读不抢占。
         boolean preview = out != null && out.preview;
@@ -301,6 +326,9 @@ public class PolicyService {
             out.providerSeatCap = Math.max(0, d.getShareProviderSeatCap());
             out.providerCapPct = d.getShareProviderCapPct();
             out.seatFloor = Math.max(0, d.getShareMinSeats());
+            out.exploreSeats = Math.max(0, d.getShareExploreSeats());
+            out.speedSampleMaxAgeHours = d.getSpeedSampleMaxAgeHours();
+            out.speedSampleMin = MIN_JUDGMENT_SAMPLES;
         }
         // 策略级费用硬过滤：paid-only/free-only 把对侧档位在分类前整批剔除——usable/exhausted/
         // cooling 三个池都进不去，所以"全灭强放行"、"付费保底兜底"等任何路径都不可能把流量交给
@@ -373,6 +401,7 @@ public class PolicyService {
                 if (out != null) {
                     RankTrace.Row r = out.newRow(c, sc, f);
                     r.state = "COOLING";
+                    stampSpeed(r, er, speedAgeMs, now);
                     r.note = coolingNote(cr, er, channelCooling, entryCooling, halfOpenBlocked, preview);
                     rowOf.put(s, r);
                 }
@@ -384,6 +413,7 @@ public class PolicyService {
             else usable.add(s);
             if (out != null) {
                 RankTrace.Row r = out.newRow(c, sc, f);
+                stampSpeed(r, er, speedAgeMs, now);
                 if (s.blocked) {
                     r.state = "BLOCKED";
                     r.note = budgetExhausted ? "当日 token 预算已耗尽" : "并发已满（上限 " + concLimit + "）";
@@ -445,11 +475,13 @@ public class PolicyService {
             List<Scored> relSlowSrc = new ArrayList<>();
             Set<String> relSlowModels = new HashSet<>();   // 同一模型的多把 Key 只在补席池里留一份
             ConfigService.Snapshot bandSnap = configService.snapshot();
+            long nowMs = System.currentTimeMillis();
             // 并列带参照系：本组"实测最快"的首字时间。取全部健康候选而不是前 N 个——按分数排在前面的
             // 家未必是最快的（用户权重/优先级会把它顶上来），拿它当基准会把"其实大家都挺快"误判成"并列"。
+            // 只认新鲜实测：挂着十七天前旧值的家既不该被判慢，也不配替全组决定门槛画在哪。
             double fastestMs = -1;
             for (Scored s : usable) {
-                double v = measuredTtft(entry(s.candidate.providerId(), s.candidate.model()));
+                double v = freshTtft(entry(s.candidate.providerId(), s.candidate.model()), speedAgeMs, nowMs);
                 if (v >= 0 && (fastestMs < 0 || v < fastestMs)) fastestMs = v;
             }
             double tieSlowMs = fastestMs >= 0
@@ -458,30 +490,43 @@ public class PolicyService {
                 out.tieSlowMs = (long) tieSlowMs;   // 界面要说清"本次并列带画在哪、按哪个最快家画的"
                 out.fastestMs = (long) fastestMs;
             }
+            // 探索测量席候选池：席位被高分家占满之后，"没有被有效测量"的家仍要有拿到样本的入口。
+            //  无有效实测＝从没测过，或旧值已过保鲜期（见 speedState）——后者绝不能被当成"它慢"。
+            List<ExploreCand> explorePool = new ArrayList<>();
+            List<Scored> exploreSrc = new ArrayList<>();
+            Set<String> exploreModels = new HashSet<>();   // 同一模型的多把 Key 只在探索池里留一份
             for (Scored s : usable) {
-                if (band.size() >= bandCap) break;
-                if (!seenModels.add(s.candidate.providerId() + "\n" + s.candidate.model())) {
+                if (band.size() >= bandCap) {
+                    // 席位已满：后面的候选不再谈速度门槛（没座就是没座），但无有效实测的家要收进
+                    //  探索席候选池——否则"分数排在席外"会永远退化成"没人知道它到底快不快"。
+                    collectExploreCandidate(s, rowOf, seenModels, exploreModels, explorePool, exploreSrc,
+                            seatCount, speedAgeMs, nowMs, d);
+                    continue;
+                }
+                String modelKey = s.candidate.providerId() + "\n" + s.candidate.model();
+                if (!seenModels.add(modelKey)) {
                     bandOut(rowOf, s, BAND_DUP_KEY,
                             "同模型的多把 Key 合占一个抽签席（本行是重复 Key，跟首 Key 一起分摊）");
                     continue;
                 }
                 EntryRuntime er = entry(s.candidate.providerId(), s.candidate.model());
-                // 特别慢不抽签——以"最近实测中位数"为准（EWMA 会被一次尖峰钉死）。
-                // 无中位数样本（-1）放行：没被抽过恰恰最需要在抽签席上试一枪。
-                if (er.recentTtftMedian > d.getShareSlowTtftMs()) {
-                    bandOut(rowOf, s, BAND_SLOW, "最近实测首字中位 " + (long) er.recentTtftMedian + "ms 慢于阈值 "
-                            + d.getShareSlowTtftMs() + "ms，不占抽签席");
+                // 判慢只认"新鲜实测"：过期值一律按无有效实测放行（-1）——没被有效测过恰恰最需要试一枪。
+                double myTtft = freshTtft(er, speedAgeMs, nowMs);
+                // 特别慢不抽签——以新鲜的首字中位为准（EWMA 会被一次尖峰钉死，旧值会被十七天前的排队钉死）。
+                if (myTtft > d.getShareSlowTtftMs()) {
+                    bandOut(rowOf, s, BAND_SLOW, "最近实测首字中位 " + (long) myTtft + "ms 慢于阈值 "
+                            + d.getShareSlowTtftMs() + "ms，不占抽签席" + speedEvidence(er, speedAgeMs, nowMs));
                     continue;
                 }
                 // 相对慢（掉出并列带）不抽签：绝对阈值是"跨场景护栏"，判不了"这一组里谁明显落后"。
                 //  实测教训：门槛 13s 时，全组 300ms~1s 的快家里塞进一个 12s 的，它照样占席并分走
                 //  一成多流量——用户看得见"差 40 倍"，只看绝对值的规则看不见。
                 //  无实测（新模型）不参与、也不被拦：先给它一席才知道快慢。
-                double myTtft = measuredTtft(er);
                 if (tieSlowMs > 0 && myTtft > tieSlowMs) {
                     bandOut(rowOf, s, BAND_REL_SLOW, "实测首字 " + (long) myTtft + "ms 比本组最快的 "
-                            + (long) fastestMs + "ms 慢出并列带（门槛 " + (long) tieSlowMs + "ms），不占抽签席");
-                    if (relSlowModels.add(s.candidate.providerId() + "\n" + s.candidate.model())) {
+                            + (long) fastestMs + "ms 慢出并列带（门槛 " + (long) tieSlowMs + "ms），不占抽签席"
+                            + speedEvidence(er, speedAgeMs, nowMs));
+                    if (relSlowModels.add(modelKey)) {
                         relSlowPool.add(new SeatCand(s.candidate.providerId(), myTtft));
                         relSlowSrc.add(s);
                     }
@@ -491,45 +536,14 @@ public class PolicyService {
                 // 导致"偶尔 4 分钟不出首字"的慢家仍进抽签席、反复被抽中霸占并发位。
                 // 窗口内极慢样本（TTFT ≥ streamHeartbeatTimeoutMs）数达到阈值即踢出——
                 // 一次偶发尖峰不踢（自愈空间），反复极慢才是真该避让的家。
-                int verySlowSamples = verySlowTtftSamples(er);
+                int verySlowSamples = verySlowTtftSamples(er, speedAgeMs, nowMs);
                 if (verySlowSamples >= VERY_SLOW_KICK_THRESHOLD) {
                     bandOut(rowOf, s, BAND_VERY_SLOW, "窗口内有 " + verySlowSamples + " 条极慢样本，踢出抽签席");
                     continue;
                 }
-                // 限流门槛：这一家近 5 分钟反复撞 429、且学到的额度本来就紧 → 不占抽签席。
-                //  背景：抽签按 √(分数) 分摊，头部家哪怕被 L 压到 ×0.35 仍能拿走四成流量；可对
-                //  "每分钟只给 2 发"的免费家，给它席位就是按着头让它撞墙，请求还白耗在重试上。
-                //  只撤席不剔除：它仍留在兜底顺序里，其它家挂了照样接得住（不空手而归铁律）。
-                //  撞墙次数按「家」汇总（一个席位代表这个模型的流量，而 429 是账号额度事实），
-                //  额度的紧松也取该家最紧的那把 Key——宽额度家偶发几次 429 只是抖动，不撤席。
-                int limits5m = rateLimiter.providerRateLimits(s.candidate.providerId());
-                int tightCeiling = rateLimiter.tightestReqCeiling(s.candidate.providerId());
-                if (AdaptiveRateLimiter.seatBlockedByRateLimit(limits5m, tightCeiling)) {
-                    bandOut(rowOf, s, BAND_RATE_LIMIT, "近 " + (AdaptiveRateLimiter.LIMIT_DENSITY_WINDOW_MS / 60_000)
-                            + " 分钟连续撞限流 " + limits5m + " 次（该家学到的额度≈" + tightCeiling
-                            + " 次/分），不占抽签席，仍留在兜底顺序");
-                    continue;
-                }
-                // 慢性限流门槛（读库，重启不丢）：上面的密度判据是"爆发检测器"——两次 429 间隔 6 分钟
-                //  就归零，可这家其实整天都在撞墙（实测 sensenova 三天 106 发里 79 发 429）。
-                //  长窗口比例 + 样本量下限：偶发撞墙不误伤，长期撞墙的家即使本轮没撞也先让位。
-                double chronicRatio = rateLimiter.chronicLimitRatio(s.candidate.providerId());
-                long chronicN = rateLimiter.chronicSamples(s.candidate.providerId());
-                if (AdaptiveRateLimiter.seatBlockedByChronic(chronicRatio, chronicN,
-                        d.getChronicSeatBlockRatio(), d.getChronicRateMinSamples())) {
-                    bandOut(rowOf, s, BAND_CHRONIC_LIMIT, "近 " + d.getChronicRateWindowMinutes()
-                            + " 分钟真实流量里 " + Math.round(chronicRatio * 100) + "% 撞限流（" + chronicN
-                            + " 发样本），长期额度不足，不占抽签席，仍留在兜底顺序");
-                    continue;
-                }
-                // 供应商席位封顶（甲）：席位按模型去重，一家有多个高分模型时"按家累加"会成倍吃掉流量
-                //  （实测 lingxiongkeji 三个 priority 0 的模型占 3/10 席，供应商级实占 68%）。
-                //  超出上限的同家模型不占席，但仍留在兜底顺序里——撤的是抽签资格，不是候选。
-                if (seatCapPerProvider > 0
-                        && seatCount.getOrDefault(s.candidate.providerId(), 0) >= seatCapPerProvider) {
-                    bandOut(rowOf, s, BAND_PROVIDER_SEATS, "该家已有 " + seatCount.get(s.candidate.providerId())
-                            + " 个模型占席，每家最多 " + seatCapPerProvider + " 席（shareProviderSeatCap），"
-                            + "本模型不占抽签席，仍留在兜底顺序");
+                String[] hard = seatHardGates(s, seatCount, d);
+                if (hard != null) {
+                    bandOut(rowOf, s, hard[0], hard[1]);
                     continue;
                 }
                 seatCount.merge(s.candidate.providerId(), 1, Integer::sum);
@@ -559,13 +573,41 @@ public class PolicyService {
                     }
                 }
             }
-            if (out != null) {
-                out.seatsStrict = strictSeats;
-                out.seatsRelaxed = relaxed.size();
-            }
             String relaxNote = relaxed.isEmpty() ? null
                     : "并列带本轮只出 " + strictSeats + " 席，已按实测首字补 " + relaxed.size()
                             + " 席到席位下限 " + seatFloor;
+            // ---- 探索测量席：席位被高分家占满时，给"没有有效实测"的家补几席（shareExploreSeats）----
+            //  席位下限管的是"带内别缩成一两家"，探索席管的是另一头：分数排在带宽之外的家
+            //  根本没机会被量化，于是"没进席"被误读成"它慢"，而它其实只是没被测过（agnes/openrouter/
+            //  zhipu/siliconflow 同一条路）。补的仍然只是席位——份额照旧按偏好分，它分不到多少，
+            //  但足以拿到一次真实测量；测过之后要么凭实力留下，要么被新鲜实测判慢，都不再是猜测。
+            //  硬门槛一样不让路（限流/慢性/同家封顶在收集阶段就挡掉），体检已证明慢的家也不给它花用户请求。
+            List<Integer> explore = exploreSeatOrder(explorePool, seatProviders(band), bandCap,
+                    seatCapPerProvider, Math.max(0, d.getShareExploreSeats()));
+            for (int i : explore) {
+                Scored s = exploreSrc.get(i);
+                ExploreCand cand = explorePool.get(i);
+                band.add(s);
+                seatCount.merge(cand.provider(), 1, Integer::sum);
+                seenModels.add(cand.provider() + "\n" + cand.model());
+                if (rowOf != null) {
+                    RankTrace.Row r = rowOf.get(s);
+                    if (r != null) {
+                        r.bandOut = null;
+                        r.note = (cand.neverMeasured() ? "从没拿到过有效实测"
+                                : "上次实测在 " + sampleAgeText(cand.lastSampleTs(), nowMs) + "、已过期")
+                                + "：本轮占探索测量席，只为取回一次真实测量（份额仍按偏好分，不因为它"
+                                + (cand.neverMeasured() ? "没被测过" : "挂着旧值") + "就多分或少分）";
+                    }
+                }
+            }
+            if (out != null) {
+                out.seatsStrict = strictSeats;
+                out.seatsRelaxed = relaxed.size();
+                out.seatsExplore = explore.size();
+            }
+            String exploreNote = explore.isEmpty() ? null
+                    : "另补 " + explore.size() + " 席探索测量席（无有效实测的家先拿到样本）";
             if (band.size() > 1) {
                 // 份额口径：√(偏好分/席内最大偏好分) 归一，偏好分=总分去掉两个速度因子（见 prefScore），
                 // 再按供应商份额上限回灌（见 providerCappedShares）。
@@ -576,7 +618,7 @@ public class PolicyService {
                 String[] bandProviders = new String[band.size()];
                 double max = 1e-9;
                 for (int i = 0; i < band.size(); i++) {
-                    w[i] = prefScore(bandSnap, band.get(i));
+                    w[i] = prefScore(bandSnap, band.get(i), speedAgeMs);
                     bandProviders[i] = band.get(i).candidate.providerId();
                     max = Math.max(max, w[i]);
                 }
@@ -607,7 +649,8 @@ public class PolicyService {
                     out.pickReason = (chosen == usable.get(0) ? "分摊抽签命中第 " + seat + " 席（本就到了首位）"
                             : "分摊抽签命中第 " + seat + " 席，置顶取代分数首位")
                             + (fallbackNote == null ? "" : "；" + fallbackNote)
-                            + (relaxNote == null ? "" : "；" + relaxNote);
+                            + (relaxNote == null ? "" : "；" + relaxNote)
+                            + (exploreNote == null ? "" : "；" + exploreNote);
                 }
                 if (chosen != usable.get(0)) {
                     usable.remove(chosen);   // 按引用移除（Scored 未覆写 equals）
@@ -662,6 +705,101 @@ public class PolicyService {
         if (r == null || r.bandOut != null) return;
         r.bandOut = code;
         if (r.note == null) r.note = note;
+    }
+
+    /** 与速度无关的三道席位硬门槛：限流密度、慢性限流、同家席位封顶。
+     *  抽成一个方法是必须的而不是省事：探索测量席收集候选时走的是同一套门槛——"凑席位"永远不是
+     *  让门槛让路的理由，两处各写一遍迟早漏一道（漏了就是把长期撞墙的家补进席，按着头让它撞墙）。
+     *  @return {原因码, 人话说明}；null＝三道都放行 */
+    private String[] seatHardGates(Scored s, Map<String, Integer> seatCount, GatewayConfig.Defaults d) {
+        // 限流门槛：这一家近 5 分钟反复撞 429、且学到的额度本来就紧 → 不占抽签席。
+        //  背景：抽签按 √(分数) 分摊，头部家哪怕被 L 压到 ×0.35 仍能拿走四成流量；可对
+        //  "每分钟只给 2 发"的免费家，给它席位就是按着头让它撞墙，请求还白耗在重试上。
+        //  只撤席不剔除：它仍留在兜底顺序里，其它家挂了照样接得住（不空手而归铁律）。
+        //  撞墙次数按「家」汇总（一个席位代表这个模型的流量，而 429 是账号额度事实），
+        //  额度的紧松也取该家最紧的那把 Key——宽额度家偶发几次 429 只是抖动，不撤席。
+        int limits5m = rateLimiter.providerRateLimits(s.candidate.providerId());
+        int tightCeiling = rateLimiter.tightestReqCeiling(s.candidate.providerId());
+        if (AdaptiveRateLimiter.seatBlockedByRateLimit(limits5m, tightCeiling)) {
+            return new String[]{BAND_RATE_LIMIT, "近 " + (AdaptiveRateLimiter.LIMIT_DENSITY_WINDOW_MS / 60_000)
+                    + " 分钟连续撞限流 " + limits5m + " 次（该家学到的额度≈" + tightCeiling
+                    + " 次/分），不占抽签席，仍留在兜底顺序"};
+        }
+        // 慢性限流门槛（读库，重启不丢）：上面的密度判据是"爆发检测器"——两次 429 间隔 6 分钟
+        //  就归零，可这家其实整天都在撞墙（实测 sensenova 三天 106 发里 79 发 429）。
+        //  长窗口比例 + 样本量下限：偶发撞墙不误伤，长期撞墙的家即使本轮没撞也先让位。
+        double chronicRatio = rateLimiter.chronicLimitRatio(s.candidate.providerId());
+        long chronicN = rateLimiter.chronicSamples(s.candidate.providerId());
+        if (AdaptiveRateLimiter.seatBlockedByChronic(chronicRatio, chronicN,
+                d.getChronicSeatBlockRatio(), d.getChronicRateMinSamples())) {
+            return new String[]{BAND_CHRONIC_LIMIT, "近 " + d.getChronicRateWindowMinutes()
+                    + " 分钟真实流量里 " + Math.round(chronicRatio * 100) + "% 撞限流（" + chronicN
+                    + " 发样本），长期额度不足，不占抽签席，仍留在兜底顺序"};
+        }
+        // 供应商席位封顶（甲）：席位按模型去重，一家有多个高分模型时"按家累加"会成倍吃掉流量
+        //  （实测 lingxiongkeji 三个 priority 0 的模型占 3/10 席，供应商级实占 68%）。
+        //  超出上限的同家模型不占席，但仍留在兜底顺序里——撤的是抽签资格，不是候选。
+        int seatCap = Math.max(0, d.getShareProviderSeatCap());
+        if (seatCap > 0 && seatCount.getOrDefault(s.candidate.providerId(), 0) >= seatCap) {
+            return new String[]{BAND_PROVIDER_SEATS, "该家已有 " + seatCount.get(s.candidate.providerId())
+                    + " 个模型占席，每家最多 " + seatCap + " 席（shareProviderSeatCap），"
+                    + "本模型不占抽签席，仍留在兜底顺序"};
+        }
+        return null;
+    }
+
+    /** 收一个探索测量席候选（只在带宽已满、后面没座时调用）。
+     *  入池条件＝这一发没有新鲜实测（从没测过，或旧值过了保鲜期）。有新鲜实测的家只是分数排在席外，
+     *  它的速度是已知的，不该占探索席（探索席花的是用户真实请求）。
+     *  门槛顺序与带内一致：同模型重复 Key 跳过 → 三道硬门槛按原因定性 → 体检已证明慢的按 BAND_PROBE_SLOW
+     *  定性 → 才进池。任何一道挡下的都照旧留在兜底顺序里，只撤抽签资格。 */
+    private void collectExploreCandidate(Scored s, Map<Scored, RankTrace.Row> rowOf,
+                                         Set<String> seenModels, Set<String> exploreModels,
+                                         List<ExploreCand> pool, List<Scored> src,
+                                         Map<String, Integer> seatCount, long speedMaxAgeMs, long nowMs,
+                                         GatewayConfig.Defaults d) {
+        String modelKey = s.candidate.providerId() + "\n" + s.candidate.model();
+        if (seenModels.contains(modelKey) || !exploreModels.add(modelKey)) return;
+        EntryRuntime er = entry(s.candidate.providerId(), s.candidate.model());
+        if (freshTtft(er, speedMaxAgeMs, nowMs) >= 0) return;
+        String[] hard = seatHardGates(s, seatCount, d);
+        if (hard != null) {
+            bandOut(rowOf, s, hard[0], hard[1]);
+            return;
+        }
+        // 体检否决：巡检一直在免费测这一家。已经测出"慢过绝对门槛"的，不该再拿用户的真实请求去试第二次。
+        if (probeVetoesExplore(er.probeTtftMedianMs, er.probeSampleTs, speedMaxAgeMs,
+                d.getShareSlowTtftMs(), nowMs)) {
+            bandOut(rowOf, s, BAND_PROBE_SLOW, "本轮没有新鲜真实流量可判，但巡检体检的首字中位 "
+                    + (long) er.probeTtftMedianMs + "ms 已慢过阈值 " + d.getShareSlowTtftMs()
+                    + "ms，不占探索测量席（省下的那次是用户的真实请求），仍留在兜底顺序");
+            return;
+        }
+        pool.add(new ExploreCand(s.candidate.providerId(), s.candidate.model(),
+                speedState(er, speedMaxAgeMs, nowMs) == SpeedState.UNKNOWN, er.lastSpeedSampleTs));
+        src.add(s);
+    }
+
+    /** 判慢留痕补一句"凭几条样本"：席位是被一个中位数撤走的，用户有权知道它背后有几发真实测量。 */
+    private static String speedEvidence(EntryRuntime er, long maxAgeMs, long now) {
+        int n = maxAgeMs <= 0 ? er.recentTtftCount : freshTtftSamples(er, maxAgeMs, now);
+        return "（凭保鲜期内 " + n + " 条样本）";
+    }
+
+    /** 把"这一发的速度证据新不新鲜"写进留痕行。
+     *  界面必须分清 UNKNOWN（从没测过 → 该试一枪）与 STALE（十七天前的旧值 → 该追问为什么没新流量）：
+     *  两者在用户眼里是完全不同的问题，混成一个"慢"就都没法处置。 */
+    private static void stampSpeed(RankTrace.Row r, EntryRuntime er, long maxAgeMs, long now) {
+        SpeedState st = speedState(er, maxAgeMs, now);
+        r.speedState = st.name();
+        // 窗内条数只在"证据不够判"时记：界面要能说清是"整窗都过期了"还是"过期之外样本太少"
+        if (st != SpeedState.MEASURED) {
+            r.speedSamples = maxAgeMs <= 0 ? er.recentTtftCount
+                    : freshTtftSamples(er, maxAgeMs, now);
+        }
+        if (st == SpeedState.STALE && er.lastSpeedSampleTs > 0) {
+            r.speedAgeHours = Math.max(0, now - er.lastSpeedSampleTs) / 3600_000.0;
+        }
     }
 
     private static void recordFiltered(RankTrace out, Candidate c, String reason, String note) {
@@ -790,6 +928,101 @@ public class PolicyService {
         return v >= TTFT_ARTIFACT_FLOOR_MS ? v : -1;
     }
 
+    /** 这套首字实测现在还算不算"最新实测"（三态判据，纯函数）。
+     *  maxAgeMs≤0＝用户显式关掉过期判定（旧值永远算数，退回 2026-10-14 之前的行为）。
+     *  开启时只看一条尺：保鲜期窗内的样本能不能凑出一个中位数（见 freshTtftMedian）。
+     *  窗内一条都没有（全过期／快照带回的旧值连来源时刻都没有）判 STALE 而不是 UNKNOWN：
+     *  它确实有过测量，只是当下不可用——界面要能说"样本已过期"，而不是伪装成"从没测过"。
+     *  为什么不再看 lastSpeedSampleTs 那类"整窗一个戳"：一条新样本会把整窗旧值盖上新鲜戳。
+     *  2026-10-15 的 agnes 正卡在这条缝上（回填只捞到 1 条 11771ms，快照带回的 12727.5 鬼值
+     *  因此被当成"刚测的"，每一发 BAND_REL_SLOW 出局→没流量→凑不齐样本→鬼值永不翻页）；
+     *  10-16 补上"窗内至少 2 条"后又露出下一层：448 与昨日 11771 两条求均值＝6109ms，
+     *  一条尖峰占掉一半证据，照样钉死一家。所以时间尺必须逐样本落地。 */
+    static SpeedState speedState(EntryRuntime er, long maxAgeMs, long now) {
+        if (measuredTtft(er) < 0) return SpeedState.UNKNOWN;
+        if (maxAgeMs <= 0) return SpeedState.MEASURED;   // 用户显式关掉过期判定：旧值照旧算数
+        return freshTtftMedian(er, maxAgeMs, now) >= 0 ? SpeedState.MEASURED : SpeedState.STALE;
+    }
+
+    /** 判慢用的"实测首字"（ms）：只有新鲜实测才参与，-1＝无有效实测（走中性档）。
+     *  这条线是本次改造的关键——并列带/绝对慢门槛/份额参照系全部改读它，过期值就当没测过。
+     *  读的是"保鲜期窗内样本的中位数"而不是整窗中位数：环窗按条数滚动，只按条数取等于
+     *  让很久以前的尖峰继续参与今天的判定（2026-10-14 的 agnes 就是这么锁死的）。 */
+    static double freshTtft(EntryRuntime er, long maxAgeMs, long now) {
+        double all = measuredTtft(er);
+        if (all < 0) return -1;                       // 从没测过／只剩计量伪值
+        if (maxAgeMs <= 0) return all;                // 用户显式关掉过期判定：旧值照旧算数
+        return freshTtftMedian(er, maxAgeMs, now);
+    }
+
+    /** 保鲜期窗内的样本条数（调用方需持 synchronized(er)；本方法自己不加锁，供锁内复用）。
+     *  ts≤0 的一格不算：来源时刻追不到的样本，没有资格声称"现在还是新的"。 */
+    private static int windowSampleCount(EntryRuntime er, long maxAgeMs, long now) {
+        long[] win = er.recentTtftWin;
+        long[] ts = er.recentTtftTs;
+        if (win == null || ts == null) return 0;
+        int n = 0;
+        for (int i = 0; i < er.recentTtftCount && i < win.length && i < ts.length; i++) {
+            if (win[i] < TTFT_ARTIFACT_FLOOR_MS) continue;
+            if (maxAgeMs > 0 && (ts[i] <= 0 || now - ts[i] > maxAgeMs)) continue;
+            n++;
+        }
+        return n;
+    }
+
+    /** 界面/留痕用：这一家在保鲜期窗内攒够判定条数没有（返回 n，锁内读窗）。 */
+    static int freshTtftSamples(EntryRuntime er, long maxAgeMs, long now) {
+        synchronized (er) {
+            return windowSampleCount(er, maxAgeMs, now);
+        }
+    }
+
+    /** 吞吐样本的分母：出字窗口。
+     *
+     *  流式的 totalMs 从接单起算、ttftMs 也在同一把钟上，两者之差就是"首字之后还在出活"的那段——
+     *  用它才算得出出字速度。缓冲式响应（非流式）的 ttft 等于整个上游等待，差值≈0，
+     *  那种请求根本没有逐字窗口，只能退回整窗（此时预填充确实混在分母里，是测量极限、不是口径错误）。
+     *  totalMs &lt; ttftMs 只会来自旧口径的历史行（两把钟），此时同样退回整窗，绝不返回负数把速率算反。 */
+    static long throughputWindowMs(long totalMs, Long ttftMs) {
+        if (totalMs <= 0) return 0;
+        if (ttftMs == null || ttftMs < 0) return totalMs;
+        long gen = totalMs - ttftMs;
+        return gen >= MIN_GENERATION_WINDOW_MS ? gen : totalMs;
+    }
+
+    /** "这一家现在有多快"的唯一口径：保鲜期窗内样本的中位数。
+     *  窗内不足 MIN_JUDGMENT_SAMPLES 条返回 -1＝证据不足，不判慢（速度未知 ≠ 速度很慢）。
+     *  maxAgeMs 必须 >0（关闭过期判定那条路由 freshTtft/speedState 直接走整窗旧值）。 */
+    static double freshTtftMedian(EntryRuntime er, long maxAgeMs, long now) {
+        synchronized (er) {
+            long[] win = er.recentTtftWin;
+            long[] ts = er.recentTtftTs;
+            if (win == null || ts == null) return -1;
+            long[] v = new long[win.length];
+            int n = 0;
+            for (int i = 0; i < er.recentTtftCount && i < win.length && i < ts.length; i++) {
+                if (win[i] < TTFT_ARTIFACT_FLOOR_MS) continue;
+                if (ts[i] <= 0 || now - ts[i] > maxAgeMs) continue;
+                v[n++] = win[i];
+            }
+            if (n < MIN_JUDGMENT_SAMPLES) return -1;
+            java.util.Arrays.sort(v, 0, n);
+            // 与 recomputeRecentMedian 同一口径：偶数取中间两数均值
+            return n % 2 == 1 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2.0;
+        }
+    }
+
+    /** 体检值能否否决"给这一家探索测量席"（纯函数）。
+     *  探索席花的是用户真实请求，而巡检 probe 一直在免费测——体检已经慢过绝对门槛的家，
+     *  不该再拿用户的请求去"重新试一次"。无有效体检样本（没测过/值也过期了）不否决：未知不是慢的证据。
+     *  注意体检值只走这一条"拦"的路，绝不进分数、并列带参照系或份额结算。 */
+    static boolean probeVetoesExplore(double probeMedianMs, long probeSampleTs, long maxAgeMs,
+                                      long slowTtftMs, long now) {
+        if (probeMedianMs < 0 || probeSampleTs <= 0) return false;
+        if (maxAgeMs > 0 && now - probeSampleTs > maxAgeMs) return false;
+        return probeMedianMs > slowTtftMs;
+    }
+
     /** S 因子：实测首字的归一化倒数（200ms 即满分 5.0）。
      *  无实测按费用档给保守默认——未知不得比真实样本更乐观：免费 0.9（鼓励先试）/付费 0.5。 */
     static double speedFactor(String tier, double ttftEst) {
@@ -851,6 +1084,57 @@ public class PolicyService {
         return picked;
     }
 
+    /** 探索测量席候选：一家（一个模型）在没有新鲜实测时的排队依据。
+     *  neverMeasured＝从没拿到过有效实测；否则 lastSampleTs 是那枚过期样本自己的时刻（0＝来源时刻追不到）。 */
+    record ExploreCand(String provider, String model, boolean neverMeasured, long lastSampleTs) {}
+
+    /**
+     * 探索测量席的补席决策（纯函数——"没被测过 ≠ 慢"这条不变量钉在它的单测上）。
+     * 带宽被高分家占满之后，"没有新鲜实测"的家连一次量化机会都没有，于是"没进席"被下游读成"它慢"，
+     * 而它其实只是没被测过（2026-10-14 的 agnes/openrouter/zhipu/siliconflow 全走的是这条路）。
+     * 规矩：从没测过的排最前（未知最该补一次测量）；其次按过期样本的时刻从旧到新（越旧越不可信，
+     * 来源时刻未知＝0 视为最旧：它连"哪天测的"都说不清）；同家席位封顶是硬上限，探索席不越过；
+     * 只补 exploreSeats 席，补满即停。家名＋模型参与定序，同一份输入可重放（单测据此断言）。
+     * 带宽（shareBandSize）在这里要让路：探索席是"在带宽之外另开的座"，否则带宽一满就永远补不上，
+     * 这条通道等于不存在（而 agnes 那一类恰恰是"带宽满了才轮到它"）。上限＝bandCap＋exploreSeats，
+     * 探索席自己也有帽，不会把池子无限撑大。
+     *
+     * @return explorePool 中应补进席位的下标，按补席次序
+     */
+    static List<Integer> exploreSeatOrder(List<ExploreCand> explorePool, List<String> seatedProviders,
+                                          int bandCap, int seatCapPerProvider, int exploreSeats) {
+        int seats = seatedProviders.size();
+        if (exploreSeats <= 0 || explorePool.isEmpty()) return List.of();
+        int target = Math.min(bandCap + exploreSeats, seats + exploreSeats);
+        Map<String, Integer> perProvider = new HashMap<>();
+        for (String p : seatedProviders) perProvider.merge(p, 1, Integer::sum);
+        List<Integer> order = new ArrayList<>(explorePool.size());
+        for (int i = 0; i < explorePool.size(); i++) order.add(i);
+        order.sort(Comparator.<Integer, Boolean>comparing(i -> !explorePool.get(i).neverMeasured())
+                .thenComparingLong(i -> explorePool.get(i).lastSampleTs())
+                .thenComparing(i -> explorePool.get(i).provider() + "\n" + explorePool.get(i).model()));
+        List<Integer> picked = new ArrayList<>();
+        for (int i : order) {
+            if (seats >= target) break;
+            String p = explorePool.get(i).provider();
+            if (seatCapPerProvider > 0 && perProvider.getOrDefault(p, 0) >= seatCapPerProvider) continue;
+            picked.add(i);
+            perProvider.merge(p, 1, Integer::sum);
+            seats++;
+        }
+        return picked;
+    }
+
+    /** 过期样本"多久以前的"人话（留痕与界面共用，别两处各编一套单位）。
+     *  来源时刻追不到就直说不知道——精确到"几分前"会是假话。 */
+    static String sampleAgeText(long ts, long now) {
+        if (ts <= 0) return "来源时刻未知";
+        long age = Math.max(0, now - ts);
+        if (age >= 86_400_000L) return (age / 86_400_000L) + " 天";
+        if (age >= 3_600_000L) return (age / 3_600_000L) + " 小时";
+        return Math.max(1, age / 60_000L) + " 分钟";
+    }
+
     /** 吞吐因子＝出字速度：地板 0.4，每 80 tok/s 加 1.0（48 tok/s 才是中性 1.0），≈168 tok/s 起封顶 2.5；
      *  既要首字快（S）也要出活快（T）。
      *  无样本与 S 同哲学：免费 0.9 / 其余 0.5，防"无历史包袱"的付费模型凭默认分反超。
@@ -865,13 +1149,16 @@ public class PolicyService {
      *  为什么份额不看速度而席位看：能同席的候选已经过并列带门槛（首字彼此相差 ≤ shareSpeedTieRatio 倍，
      *  属"相差不是很大"），再按速度分份额就等于对同一件事罚两遍，赢家仍会拿走大半流量。
      *  除掉的是 S 和 T 两个速度因子（用户说的"响应速度"包含出字快慢）；
-     *  继续说话的只有：优先级 P、用户权重 U、费用档 C、健康 H、质量 Q、代码分 CS、限流 R/L。 */
-    private double prefScore(ConfigService.Snapshot snap, Scored s) {
+     *  继续说话的只有：优先级 P、用户权重 U、费用档 C、健康 H、质量 Q、代码分 CS、限流 R/L。
+     *  速度维度读 freshTtft（只认新鲜实测）：除回去的必须是分数里真正乘过的那个数，
+     *  否则"分数按过期值扣了、份额按中性值除"，两边对不上就会凭空多出或丢掉一成份额。 */
+    private double prefScore(ConfigService.Snapshot snap, Scored s, long speedMaxAgeMs) {
         String pid = s.candidate.providerId();
         String model = s.candidate.model();
         EntryRuntime er = entry(pid, model);
         String tier = snap.effectiveCostTier(pid, model);
-        double sf = speedFactor(tier, measuredTtft(er)) * throughputFactor(tier, er.ewmaTokensPerSec);
+        double sf = speedFactor(tier, freshTtft(er, speedMaxAgeMs, System.currentTimeMillis()))
+                * throughputFactor(tier, er.ewmaTokensPerSec);
         return s.score / Math.max(sf, 1e-9);
     }
 
@@ -975,8 +1262,10 @@ public class PolicyService {
         //  教训（12:13 付费反超案）：免费模型被大请求刷出慢样本（S≈0.2），付费模型无样本
         //  拿乐观 0.9 → 反超。无样本 = 未知，不能比真实样本更乐观：免费 0.9（鼓励先试）
         //  但付费 0.5（未知速度的付费模型绝不排到有真实样本的免费模型前面）
-        ensureRecentTtft(er, c.providerId, c.model);
-        double ttftEst = measuredTtft(er);
+        ensureRecentTtft(er, c.providerId, c.model, speedMaxAgeMs(d));
+        // 过期值不配当"最新实测"：它既不该判慢（那是十七天前那次排队的事），也不该伪装成快。
+        // 判为"无有效实测"走下面的中性档——未知不得比真实样本更乐观，这条规矩原样保留。
+        double ttftEst = freshTtft(er, speedMaxAgeMs(d), System.currentTimeMillis());
         double s = speedFactor(tier, ttftEst);
 
         // T: 吞吐系数——出 token 速率 EWMA（长回复场景快模型胜出）。纯函数见 throughputFactor
@@ -1187,53 +1476,100 @@ public class PolicyService {
 
     // ================= 事件记录（由 stats/forward 调用） =================
 
-    /** 重算最近 TTFT 中位数（调用方持 synchronized(er)）。样本<2 不定中位数：一条尖峰就成了"典型速度"没意义 */
+    /** 重算整窗 TTFT 中位数（调用方持 synchronized(er)）。样本<2 不定中位数：一条尖峰就成了"典型速度"没意义。
+     *  这个值是"整窗"口径：界面展示历史中位、以及"这一家到底有没有测过"（UNKNOWN 判据）看它；
+     *  判慢/份额参照系读的是 freshTtftMedian（只认保鲜期窗内样本），两者在窗里混着旧尖峰时不同。
+     *  这里不盖时间戳——新鲜度看的是每条样本自己的时刻（recentTtftTs），不是"什么时候算的"：
+     *  快照每 60 秒重算一次落库，用计算时刻会把陈旧值洗白成最新实测。 */
     private static void recomputeRecentMedian(EntryRuntime er) {
         if (er.recentTtftCount < 2) return;
         long[] cp = java.util.Arrays.copyOf(er.recentTtftWin, er.recentTtftCount);
         java.util.Arrays.sort(cp);
         er.recentTtftMedian = cp.length % 2 == 1
                 ? cp[cp.length / 2] : (cp[cp.length / 2 - 1] + cp[cp.length / 2]) / 2.0;
-        er.medianTs = System.currentTimeMillis();
     }
 
-    /** 统计窗口内"极慢样本"数（TTFT ≥ VERY_SLOW_TTFT_MS）。调用方持 synchronized(er)。 */
-    private static int verySlowTtftSamples(EntryRuntime er) {
-        if (er.recentTtftWin == null || er.recentTtftCount == 0) return 0;
-        int n = 0;
-        for (int i = 0; i < er.recentTtftCount; i++) {
-            if (er.recentTtftWin[i] >= VERY_SLOW_TTFT_MS) n++;
-        }
-        return n;
-    }
-
-    /** 进程重启后从请求日志回填"最近实测"TTFT（每条目每进程最多查一次）。
-     *  EWMA 一旦带上尖峰样本会把慢判钉死很久——若只用 EWMA 当判据，偶尔抽风的快模型
-     *  重启后永远回不了分摊抽签席（没份额→没样本→永远"慢"）。日志里有真相，直接拿来补窗。 */
-    private void ensureRecentTtft(EntryRuntime er, String providerId, String model) {
-        if (er.ttftSeeded || er.recentTtftCount > 0) return;
-        // 只有一种中位数可以挡住回填：本进程内还算新鲜的"上次真实值"。跨重启恢复的旧中位数
-        // 不再自我免疫——否则上周一次抽风能把模型永久钉在 BAND_SLOW 外（没席位→没流量→没新样本）。
-        if (er.recentTtftMedian >= 0
-                && System.currentTimeMillis() - er.medianTs < RESTORED_MEDIAN_FRESH_MS) return;
-        er.ttftSeeded = true;
-        List<Long> hist = dao.recentOkTtfts(providerId, model, 8, LARGE_CONTEXT_TOKENS,
-                TTFT_ARTIFACT_FLOOR_MS);   // 新→旧
-        if (hist.isEmpty()) return;
+    /** 保鲜期窗内"极慢样本"数（TTFT ≥ VERY_SLOW_TTFT_MS）：和判慢用同一条时间尺。
+     *  旧实现按条数取整窗，等于让很久以前的同秒压测一直占着踢席证据——那批样本早就不能代表
+     *  这一家现在会不会抽风了，却每次都数得出来，把家永久逐出席位。 */
+    private static int verySlowTtftSamples(EntryRuntime er, long maxAgeMs, long now) {
         synchronized (er) {
-            if (er.recentTtftCount > 0) return;          // 实时样本先到：不画蛇添足
-            er.recentTtftWin = new long[Math.max(8, hist.size())];
+            long[] win = er.recentTtftWin;
+            long[] ts = er.recentTtftTs;
+            if (win == null || ts == null) return 0;
+            int n = 0;
+            for (int i = 0; i < er.recentTtftCount && i < win.length && i < ts.length; i++) {
+                if (maxAgeMs > 0 && (ts[i] <= 0 || now - ts[i] > maxAgeMs)) continue;
+                if (win[i] >= VERY_SLOW_TTFT_MS) n++;
+            }
+            return n;
+        }
+    }
+
+    /** 样本保鲜期（ms）：界面配的是小时，内部统一算成 ms。≤0＝用户显式关闭过期判定（旧值永远算数）。 */
+    static long speedMaxAgeMs(GatewayConfig.Defaults d) {
+        int h = d == null ? 72 : d.getSpeedSampleMaxAgeHours();
+        return h <= 0 ? 0 : h * 3600_000L;
+    }
+
+    /** 一列样本的中位数（与 recomputeRecentMedian 同一口径：偶数取中间两数均值）。
+     *  回填/体检两条路都走它，别搞出两套"典型速度"。 */
+    private static double medianOf(java.util.List<StatsDao.TtftSample> samples) {
+        long[] v = new long[samples.size()];
+        for (int i = 0; i < v.length; i++) v[i] = samples.get(i).ttftMs();
+        java.util.Arrays.sort(v);
+        return v.length % 2 == 1 ? v[v.length / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2.0;
+    }
+
+    /** 进程重启后从请求日志回填"最近实测"TTFT（每条目每进程最多查一次），并顺手取回体检样本备用。
+     *  EWMA 一旦带上尖峰样本会把慢判钉死很久——若只用 EWMA 当判据，偶尔抽风的快模型
+     *  重启后永远回不了分摊抽签席（没份额→没样本→永远"慢"）。日志里有真相，直接拿来补窗。
+     *
+     *  回填必须带时间界（speedSampleMaxAgeHours）：只留条数上限不留时间界时，"最近 8 条"这个坑会被
+     *  很久以前的样本永久占着——2026-10-14 的 agnes 就是这么锁死的：8 格里 6 格来自 09-28 13:51
+     *  那一发 java 同秒压测（11.6~16.9s，输入才 369 tok），中位数 12727ms 十七天不动，
+     *  而并列带门槛 3864ms 判它出局，"没席位→没流量→没新样本"闭环再无出路。
+     *
+     *  跨重启恢复的中位数不带采样时刻（快照只存值，不存"这值是哪次测量算的"），所以它永远进不了
+     *  MEASURED 档，必须由这条路重算或被判过期。旧实现拿快照写入时刻冒充采样时刻，而快照每 60 秒
+     *  重写一次——等于宣称所有旧值永远新鲜，3 小时保鲜期形同虚设。 */
+    private void ensureRecentTtft(EntryRuntime er, String providerId, String model, long maxAgeMs) {
+        if (er.ttftSeeded || er.recentTtftCount > 0) return;
+        long now = System.currentTimeMillis();
+        // 只有"本进程算出来且还在保鲜期内"的实测才挡住回填
+        if (speedState(er, maxAgeMs, now) == SpeedState.MEASURED) return;
+        er.ttftSeeded = true;
+        long minTs = maxAgeMs <= 0 ? 0 : now - maxAgeMs;
+        List<StatsDao.TtftSample> hist = dao.recentOkTtfts(providerId, model, 8, LARGE_CONTEXT_TOKENS,
+                TTFT_ARTIFACT_FLOOR_MS, minTs);   // 新→旧
+        // 体检旁证同样按保鲜期取；它只用于"这一家到底慢不慢"的判定（见 probeVetoesExplore）
+        List<StatsDao.TtftSample> probe = dao.recentProbeTtfts(providerId, model, 8,
+                TTFT_ARTIFACT_FLOOR_MS, minTs);
+        if (hist.isEmpty() && probe.isEmpty()) return;
+        synchronized (er) {
+            if (!probe.isEmpty()) {
+                er.probeTtftMedianMs = medianOf(probe);
+                er.probeSampleTs = probe.get(0).ts();       // 新→旧，第 0 条就是最近一次体检
+            }
+            if (hist.isEmpty() || er.recentTtftCount > 0) return;   // 实时样本先到：不画蛇添足
+            int cap = Math.max(8, hist.size());
+            er.recentTtftWin = new long[cap];
+            er.recentTtftTs = new long[cap];
             for (int i = 0; i < hist.size(); i++) {      // 旧→新填入，后续实时样本从尾部滚动覆盖最旧
-                er.recentTtftWin[i] = hist.get(hist.size() - 1 - i);
+                StatsDao.TtftSample smp = hist.get(hist.size() - 1 - i);
+                er.recentTtftWin[i] = smp.ttftMs();
+                er.recentTtftTs[i] = smp.ts();           // 每条样本带自己的时刻：判定按保鲜期逐条过滤
             }
             er.recentTtftIdx = hist.size() % er.recentTtftWin.length;
             er.recentTtftCount = hist.size();
+            er.lastSpeedSampleTs = hist.get(0).ts();     // 最新一条样本的时刻（界面报"多久没测过"用它）
             recomputeRecentMedian(er);
         }
     }
 
     /** 请求成功：记录 TTFT 与 usage（client = 接入工具，用于按工具分桶统计）
-     *  totalMs = 本请求总时长（流式=首字到流结束；吞吐速率按它算，ttft 只反映首字）
+     *  totalMs = 本请求总时长，从「网关接单」到「交付完」，与 ttftMs 同一把钟（故 totalMs ≥ ttftMs）；
+     *  吞吐速率按 throughputWindowMs(totalMs, ttftMs) 这段出字窗口算，不拿整窗——首字等待已由 S 计过一次。
      *
      *  探测隔离（client=probe）：巡检成功只做半开熔断恢复验证，不进速度评分（EWMA/吞吐窗）、
      *  不清真实失败计数、不记预算、不进限流学习——ping 的 10-token 样本
@@ -1257,14 +1593,26 @@ public class PolicyService {
                     er.ewmaTtftMs = er.ewmaTtftMs < 0 ? ttftMs : alpha * ttftMs + (1 - alpha) * er.ewmaTtftMs;
                     // 同时进最近样本环形窗：中位数=抗尖峰的"典型首字速度"（分摊抽签门槛用它）
                     if (er.recentTtftWin == null) er.recentTtftWin = new long[8];
+                    if (er.recentTtftTs == null || er.recentTtftTs.length != er.recentTtftWin.length)
+                        er.recentTtftTs = new long[er.recentTtftWin.length];
                     er.recentTtftWin[er.recentTtftIdx] = ttftMs;
+                    er.recentTtftTs[er.recentTtftIdx] = System.currentTimeMillis();  // 样本自己的时刻，逐格记
                     er.recentTtftIdx = (er.recentTtftIdx + 1) % er.recentTtftWin.length;
                     if (er.recentTtftCount < er.recentTtftWin.length) er.recentTtftCount++;
+                    er.lastSpeedSampleTs = System.currentTimeMillis();   // 真实测量发生的这一刻
                     recomputeRecentMedian(er);
                 }
-                // 吞吐因子：出 token/秒（按总时长；无 usage/时长异常不动，防离谱样本污染）
-                if (tokensOut != null && tokensOut > 0 && totalMs > 0) {
-                    double tps = tokensOut * 1000.0 / totalMs;
+                // 口径哨兵：total 与 ttft 必须同一把钟，所以 total < ttft 结构上不该再出现。
+                // 一旦出现就是有路径偷偷换了计时起点（2026-10-16 之前的流式就是 relay 起点），当场喊出来。
+                if (totalMs > 0 && ttftMs != null && ttftMs > totalMs) {
+                    log.warn("速度口径异常 {}/{}：总时长 {}ms 小于首字 {}ms（两处计时不同源）",
+                            providerId, model, totalMs, ttftMs);
+                }
+                // 吞吐因子：出 token/秒。分母用"能观测到逐字输出的窗口"（见 throughputWindowMs），
+                // 不是整段请求时长——首字等待已经被 S 罚过一次，再进 T 就是连乘两次。
+                long win = throughputWindowMs(totalMs, ttftMs);
+                if (tokensOut != null && tokensOut > 0 && win > 0) {
+                    double tps = tokensOut * 1000.0 / win;
                     if (tps > 0 && tps < 1000) er.ewmaTokensPerSec =
                             er.ewmaTokensPerSec < 0 ? tps : alpha * tps + (1 - alpha) * er.ewmaTokensPerSec;
                 }
@@ -1638,6 +1986,7 @@ public class PolicyService {
         Map<String, Object> out = new LinkedHashMap<>();
         List<Map<String, Object>> entryRows = new ArrayList<>();
         long now = System.currentTimeMillis();
+        long speedAgeMs = speedMaxAgeMs(configService.snapshot().config.getDefaults());
         for (Map.Entry<String, EntryRuntime> e : entries.entrySet()) {
             String[] pk = e.getKey().split("\n", 2);
             EntryRuntime er = e.getValue();
@@ -1646,6 +1995,21 @@ public class PolicyService {
             row.put("model", er.displayName != null ? er.displayName : pk[1]);
             row.put("ewmaTtftMs", er.ewmaTtftMs < 0 ? null : Math.round(er.ewmaTtftMs));
             row.put("recentTtftMedian", er.recentTtftMedian < 0 ? null : Math.round(er.recentTtftMedian));
+            // 速度证据的三种状态必须让界面分得开：「慢」和「没被测过」在用户眼里是两个完全不同的问题，
+            // 混成一列数字就会重演 2026-10-14——十七天前的旧中位数被当成"它慢"，再没人去查为什么没新流量。
+            SpeedState ss = speedState(er, speedAgeMs, now);
+            row.put("speedState", ss.name());
+            // 判定真正读的数：保鲜期窗内样本的中位数。它和上面那个"整窗中位"可以不一样
+            //（窗里混着过期尖峰时，展示值保留旧账、判定值只认窗内），界面两列都要恒显，
+            // 否则用户看见 6109 会以为网关拿它判过慢。
+            double judged = freshTtft(er, speedAgeMs, now);
+            row.put("judgedTtftMs", judged < 0 ? null : Math.round(judged));
+            row.put("freshSamples", speedAgeMs <= 0 ? er.recentTtftCount
+                    : freshTtftSamples(er, speedAgeMs, now));
+            row.put("speedWindow", er.recentTtftWin == null ? 8 : er.recentTtftWin.length);
+            row.put("speedAgeHours", ss == SpeedState.STALE && er.lastSpeedSampleTs > 0
+                    ? Math.round(Math.max(0, now - er.lastSpeedSampleTs) / 3600_000.0 * 10) / 10.0 : null);
+            row.put("probeTtftMedian", er.probeTtftMedianMs < 0 ? null : Math.round(er.probeTtftMedianMs));
             row.put("ewmaTokensPerSec", er.ewmaTokensPerSec < 0 ? null : Math.round(er.ewmaTokensPerSec * 10) / 10.0);
             row.put("consecutiveFailures", er.consecutiveFailures);
             // OPEN=冷却未到期；HALF_OPEN=到期后半开验证窗口（放行槽占用/待验证）；CLOSED=正常
@@ -1656,6 +2020,8 @@ public class PolicyService {
             entryRows.add(row);
         }
         out.put("entries", entryRows);
+        // 判"典型速度"要几条窗内样本：界面按这条线说"为什么这个值不参与判定"（窗内 n 条 < 这条线＝证据不足）
+        out.put("speedSampleMin", MIN_JUDGMENT_SAMPLES);
         List<Map<String, Object>> chRows = new ArrayList<>();
         for (Map.Entry<String, ChannelRuntime> e : channels.entrySet()) {
             String[] ck = e.getKey().split("\n", 2);
@@ -1733,10 +2099,11 @@ public class PolicyService {
                 if (r.ewmaTtftMs() != null) er.ewmaTtftMs = r.ewmaTtftMs();
                 if (r.ewmaTokensPerSec() != null) er.ewmaTokensPerSec = r.ewmaTokensPerSec();
                 if (r.recentTtftMedian() != null) {
+                    // 只恢复"值"，不恢复"新鲜"：快照里根本没有采样时刻，把写入时刻冒充采样时刻
+                    // 等于宣称旧值永远新鲜（快照每 60 秒重写一次，保鲜期形同虚设——2026-10-14 的实锤）。
+                    // lastSpeedSampleTs 保持 0，speedState 判 STALE，由 ensureRecentTtft 带时间界向
+                    // 请求日志重算；重算不出新样本，它就一直是"过期值"，不参与判慢也不参与份额。
                     er.recentTtftMedian = r.recentTtftMedian();
-                    // 带上"这条中位数是什么时候算出来的"：恢复值不再自称最新实测，
-                    // 过了保鲜期就由 ensureRecentTtft 用请求日志重算（否则上周一次抽风永久锁死抽签席）
-                    er.medianTs = r.updatedAt() == null ? 0 : r.updatedAt();
                 }
                 if (r.coolDownUntil() != null && r.coolDownUntil() > System.currentTimeMillis()) {
                     er.coolDownUntil = r.coolDownUntil();
@@ -1759,11 +2126,28 @@ public class PolicyService {
      *  仅统计有真实流量样本的条目（probe 不进中位数窗，天然不含）。 */
     public Map<String, Object> ttftStats() {
         List<Long> meds = new ArrayList<>();
+        long now = System.currentTimeMillis();
+        long maxAgeMs = speedMaxAgeMs(configService.snapshot().config.getDefaults());
+        long fresh = 0, stale = 0, unknown = 0;
         for (EntryRuntime er : entries.values()) {
-            if (er.recentTtftMedian >= 0) meds.add(Math.round(er.recentTtftMedian));
+            SpeedState st = speedState(er, maxAgeMs, now);
+            switch (st) {
+                case MEASURED -> fresh++;
+                case STALE -> stale++;
+                case UNKNOWN -> unknown++;
+            }
+            // 推荐门槛只认新鲜证据：十七天前的中位数拿来建议"现在该把慢线画在哪"是假话
+            //（保鲜期关闭时 speedState 恒为 MEASURED，退回旧口径）。
+            // 取的是判定真正读过的那个数（窗内中位数），不是界面展示用的整窗旧中位——两者在
+            // "窗里有旧尖峰"时会不一样，建议线必须和判慢线同源。
+            double judged = freshTtft(er, maxAgeMs, now);
+            if (st == SpeedState.MEASURED && judged >= 0) meds.add(Math.round(judged));
         }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("samples", meds.size());
+        out.put("fresh", fresh);
+        out.put("stale", stale);
+        out.put("unknown", unknown);
         if (meds.isEmpty()) return out;
         Collections.sort(meds);
         long med = meds.get(meds.size() / 2);
@@ -1838,6 +2222,14 @@ public class PolicyService {
         public int seatFloor;
         public int seatsStrict;
         public int seatsRelaxed;
+        /** 探索测量席（shareExploreSeats）与本轮补了几席：管的是另一头——带宽满了之后，
+         *  "没有新鲜实测"的家还要不要给它一次拿到样本的机会（0/0＝完全关闭，退回"没测过就一直没测过"）。 */
+        public int exploreSeats;
+        public int seatsExplore;
+        /** 首字样本保鲜期（小时，0=关闭过期判定）：本次判慢用的"新鲜"就是按这条线画的 */
+        public int speedSampleMaxAgeHours;
+        /** 判"典型速度"要几条窗内样本（界面用它说清"窗内 2 条为什么不算实测"） */
+        public int speedSampleMin;
         /** 供应商级封顶：甲＝一家最多占几席（0=不限），乙＝一家应得份额上限（0=不限）。界面要说清本次按什么线画的 */
         public int providerSeatCap;
         public double providerCapPct;
@@ -1883,6 +2275,10 @@ public class PolicyService {
             m.put("seatFloor", seatFloor);
             m.put("seatsStrict", seatsStrict);
             m.put("seatsRelaxed", seatsRelaxed);
+            m.put("exploreSeats", exploreSeats);
+            m.put("seatsExplore", seatsExplore);
+            m.put("speedSampleMaxAgeHours", speedSampleMaxAgeHours);
+            m.put("speedSampleMin", speedSampleMin);
             if (providerSeatCap > 0) m.put("providerSeatCap", providerSeatCap);
             if (providerCapPct > 0) m.put("providerCapPct", providerCapPct);
             m.put("preview", preview);
@@ -1922,6 +2318,10 @@ public class PolicyService {
             t.seatFloor = (int) num(m.get("seatFloor"), 0);
             t.seatsStrict = (int) num(m.get("seatsStrict"), 0);
             t.seatsRelaxed = (int) num(m.get("seatsRelaxed"), 0);
+            t.exploreSeats = (int) num(m.get("exploreSeats"), 0);
+            t.seatsExplore = (int) num(m.get("seatsExplore"), 0);
+            t.speedSampleMaxAgeHours = (int) num(m.get("speedSampleMaxAgeHours"), 0);
+            t.speedSampleMin = (int) num(m.get("speedSampleMin"), 0);
             t.providerSeatCap = (int) num(m.get("providerSeatCap"), 0);
             t.providerCapPct = num(m.get("providerCapPct"), 0);
             t.preview = Boolean.TRUE.equals(m.get("preview"));
@@ -1953,6 +2353,10 @@ public class PolicyService {
                 r.picked = Boolean.TRUE.equals(m.get("picked"));
                 r.note = str(m.get("note"));
                 r.reason = str(m.get("reason"));
+                r.speedState = str(m.get("speedState"));
+                r.speedAgeHours = num(m.get("speedAgeHours"), -1);
+                Object ss = m.get("speedSamples");
+                r.speedSamples = ss instanceof Number n ? n.intValue() : -1;
                 if (m.get("factors") instanceof Map<?, ?> fm) {
                     Map<String, Double> f = new LinkedHashMap<>();
                     fm.forEach((k, v) -> { if (v instanceof Number n) f.put(String.valueOf(k), n.doubleValue()); });
@@ -1981,6 +2385,13 @@ public class PolicyService {
             public boolean picked;      // 本次主选
             public String note;         // 人话说明（为什么冷却/为什么兜底/为什么没进席）
             public String reason;       // 仅 filtered：原因码
+            /** 本次决策时这一发的速度证据处在哪一档：MEASURED=新鲜实测 / STALE=有值但过保鲜期 / UNKNOWN=从没测过。
+             *  后两档在路由里都读成"无有效实测"，但对用户是两个完全不同的问题（该试一枪 vs 该问为什么没流量）。 */
+            public String speedState;
+            public double speedAgeHours = -1;   // STALE 时样本距今多少小时；-1＝来源时刻追不到，别说精确数字
+            /** 证据不够判时：保鲜期窗内还剩下几条样本（-1＝本次是新鲜实测，没必要记）。
+             *  界面用它说明"为什么这个慢值不参与判定"——整窗过期 vs 窗内样本太少，是两句不同的话。 */
+            public int speedSamples = -1;
 
             public Map<String, Object> toJson(boolean isFiltered) {
                 Map<String, Object> m = new LinkedHashMap<>();
@@ -1993,6 +2404,12 @@ public class PolicyService {
                     m.put("inBand", inBand);
                     if (inBand) m.put("share", round(share));
                     if (bandOut != null) m.put("bandOut", bandOut);
+                    // 新鲜实测是常态，不占体积；只有"证据不可信"时才记（界面正是要把这种行标出来）
+                    if (speedState != null && !SpeedState.MEASURED.name().equals(speedState)) {
+                        m.put("speedState", speedState);
+                        if (speedSamples >= 0) m.put("speedSamples", speedSamples);
+                        if (speedAgeHours >= 0) m.put("speedAgeHours", round(speedAgeHours));
+                    }
                     m.put("picked", picked);
                     if (factors != null) {
                         Map<String, Object> f = new LinkedHashMap<>();

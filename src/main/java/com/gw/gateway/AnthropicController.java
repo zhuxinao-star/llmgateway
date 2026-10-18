@@ -197,6 +197,8 @@ public class AnthropicController {
         try {
             ForwardEngine.ForwardResult lastFail = null;
             long requestStart = System.nanoTime();
+            // 与 OpenAI 端同源：落库 total_ms 从接单时刻起算，和 ttft_ms 用同一把钟
+            final long requestStartMs = System.currentTimeMillis();
             int attemptNo = 0;
             // ---- Fix C（同 OpenAI 端点）：totalBudget 内有限轮耐心 failover。首轮全败且可重试时，退避后
             //  按 pass1 学到的最新冷却/熔断重排名再来一轮，透明扛住免费上游瞬时限流；非重试类立即放弃。
@@ -273,7 +275,7 @@ public class AnthropicController {
                             PolicyService.Candidate winner = winnerOf(r, c);
                             // #11 并发位一直占到流排空结束（execute 已保留 c 的额度未释放，异常也要还）
                             try {
-                                streamToClient(model, winner, r, attemptNo, profile, client, openAiReq, response, cmp.compressTag(), ka);
+                                streamToClient(model, winner, r, attemptNo, profile, client, openAiReq, response, cmp.compressTag(), ka, requestStartMs);
                             } finally {
                                 policyService.releaseInflight(c.providerId(), c.model());
                             }
@@ -321,9 +323,12 @@ public class AnthropicController {
     private void streamToClient(String model, PolicyService.Candidate c,
                                  ForwardEngine.ForwardResult r, int attemptNo,
                                  String profile, String client, Map<String, Object> req,
-                                 HttpServletResponse response, String compress, SseKeepAlive ka) throws IOException {
+                                 HttpServletResponse response, String compress, SseKeepAlive ka,
+                                 long requestStartMs) throws IOException {
         GatewayConfig.Defaults d = configService.snapshot().config.getDefaults();
-        long startMs = System.currentTimeMillis();
+        // relayStartMs 只量"这段流在网关手里活了多久"（心跳窗口、首字偏移）；落库 total_ms 用 requestStartMs，
+        // 才和 ttft_ms（含 execute 里的上游等待）同一把钟——否则日志里会出现"总时长比首字还短"的行。
+        long relayStartMs = System.currentTimeMillis();
         // 延迟提交：此刻候选已真正开始吐流（execute 返回 STREAM = TTFT 窗口内拿到首字），
         // 才 commit 200 SSE 头 + 拉起 ticker，覆盖后续 token 间空档。此前任何硬失败仍回真实状态码。
         if (ka != null) {
@@ -360,11 +365,11 @@ public class AnthropicController {
                     String next = pollLine(reader, win);
                     if (next == HEARTBEAT_TIMEOUT) {
                         long now = System.currentTimeMillis();
-                        long silentMs = now - (lastRealAt == 0 ? startMs : lastRealAt);
+                        long silentMs = now - (lastRealAt == 0 ? relayStartMs : lastRealAt);
                         log.warn("[anthropic] 流中心跳超时（{}ms 无事件），掐断 {}/{}",
                                 silentMs, c.providerId(), c.model());
                         statsService.logRequest(model, c.providerId(), c.model(), (int) (r.ttftMs / 1_000_000),
-                                (int) (now - startMs), null, null, "STREAM_TIMEOUT", attemptNo, profile, "heartbeat timeout", client,
+                                (int) (now - requestStartMs), null, null, "STREAM_TIMEOUT", attemptNo, profile, "heartbeat timeout", client,
                                 compress, null, null, null, c.channelId());
                         policyService.recordFailure(c.providerId(), c.model(), c.channelId(), 0, "stream heartbeat timeout", client);
                         abortStream(out, st, silentMs);
@@ -382,12 +387,12 @@ public class AnthropicController {
                     // keep-alive 注释行/空行不算真内容：不刷新窗口；真内容窗口耗尽则掐断
                     // （pollLine 只在"完全无数据"时超时，不断吐注释行的死流靠这里发现）
                     long win = lastRealAt == 0 ? d.getStreamHeartbeatTimeoutMs() : d.getFirstTokenHeartbeatTimeoutMs();
-                    long silentMs = now - (lastRealAt == 0 ? startMs : lastRealAt);
+                    long silentMs = now - (lastRealAt == 0 ? relayStartMs : lastRealAt);
                     if (silentMs > win) {
                         log.warn("[anthropic] 流内长时间无真内容（keep-alive 行续命 {}ms），掐断 {}/{}",
                                 silentMs, c.providerId(), c.model());
                         statsService.logRequest(model, c.providerId(), c.model(), (int) (r.ttftMs / 1_000_000),
-                                (int) (now - startMs), null, null, "STREAM_TIMEOUT", attemptNo, profile, "no real content window exceeded", client,
+                                (int) (now - requestStartMs), null, null, "STREAM_TIMEOUT", attemptNo, profile, "no real content window exceeded", client,
                                 compress, null, null, null, c.channelId());
                         policyService.recordFailure(c.providerId(), c.model(), c.channelId(), 0, "stream no real content timeout", client);
                         abortStream(out, st, silentMs);
@@ -398,7 +403,7 @@ public class AnthropicController {
                 lastRealAt = now;
                 // 只记首条真内容行（对齐 OpenAI 端口径）。此前无条件覆盖使 TTFT≈整段流时长，
                 // Claude Code 全部流量的速度样本被系统性高估，污染 EWMA/中位数/分摊门槛。
-                if (firstTokenAt == null) firstTokenAt = String.valueOf(now - startMs);
+                if (firstTokenAt == null) firstTokenAt = String.valueOf(now - relayStartMs);
                 {
                     // 接住 usage（最后一个含 usage 的 chunk）+ 流式质量信号
                     if (line.startsWith("data:")) {
@@ -474,7 +479,7 @@ public class AnthropicController {
             }
             Long ttft = firstTokenAt == null ? null
                     : ForwardEngine.streamTtftMs(r, Long.parseLong(firstTokenAt));
-            recordSuccess(c, model, ttft, usage, attemptNo, profile, System.currentTimeMillis() - startMs, client, compress);
+            recordSuccess(c, model, ttft, usage, attemptNo, profile, System.currentTimeMillis() - requestStartMs, client, compress);
             // 流式输出质量自反馈（同非流式：截断/空回复软失败降权 + 早停嫌疑）
             judgeStreamQuality(c, req, streamFinish, streamSawContent, streamSawToolUse, usage,
                     streamContentLen, client, compress);
@@ -482,7 +487,7 @@ public class AnthropicController {
             // try 块内 IOException 只可能来自向客户端写出（读侧异常被 pollLine 吞成 EOF）→ 客户端断开
             log.warn("[anthropic] 客户端断开(流式) {}/{}: {}", c.providerId(), c.model(), e.getMessage());
             statsService.logRequest(model, c.providerId(), c.model(), null,
-                    (int) (System.currentTimeMillis() - startMs), null, null, "CLIENT_ABORTED", attemptNo, profile, e.getMessage(), client,
+                    (int) (System.currentTimeMillis() - requestStartMs), null, null, "CLIENT_ABORTED", attemptNo, profile, e.getMessage(), client,
                     compress, null, null, null, c.channelId());
         }
     }
@@ -547,7 +552,7 @@ public class AnthropicController {
             out = Json.longVal(usage.get("completion_tokens"));
         }
         policyService.recordSuccess(c.providerId(), c.model(), c.channelId(),
-                ttftMs, in, out, false, client, Math.max(1, totalMs));
+                ttftMs, in, out, false, client, totalMs);
         statsService.logRequest(model, c.providerId(), c.model(), ttftMs == null ? null : (int) (long) ttftMs,
                 (int) totalMs, in, out, status, attempts, profile,
                 "CLIENT_ABORTED".equals(status) ? "client disconnected before delivery" : null, client,

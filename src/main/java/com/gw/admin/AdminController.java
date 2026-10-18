@@ -964,6 +964,8 @@ public class AdminController {
         out.put("providerSeatCap", d.getShareProviderSeatCap());
         out.put("providerCapPct", d.getShareProviderCapPct());
         out.put("minSeats", d.getShareMinSeats());
+        out.put("exploreSeats", d.getShareExploreSeats());
+        out.put("speedMaxAgeHours", d.getSpeedSampleMaxAgeHours());
         out.put("chronicWindowMinutes", d.getChronicRateWindowMinutes());
         out.put("chronicMinSamples", d.getChronicRateMinSamples());
         out.put("chronicSeatBlockRatio", d.getChronicSeatBlockRatio());
@@ -981,6 +983,8 @@ public class AdminController {
         Integer seatCap = intOrNull(body.get("providerSeatCap"));
         Double capPct = doubleOrNull(body.get("providerCapPct"));
         Integer minSeats = intOrNull(body.get("minSeats"));
+        Integer explore = intOrNull(body.get("exploreSeats"));
+        Integer speedAge = intOrNull(body.get("speedMaxAgeHours"));
         Integer cWin = intOrNull(body.get("chronicWindowMinutes"));
         Integer cMin = intOrNull(body.get("chronicMinSamples"));
         Double cRatio = doubleOrNull(body.get("chronicSeatBlockRatio"));
@@ -993,12 +997,19 @@ public class AdminController {
             return bad("providerCapPct 需为 0（不限）或 0.1~1.0");
         if (minSeats != null && (minSeats < 0 || minSeats > 10))
             return bad("minSeats 需在 0~10（0=关闭席位下限，退回速度说了算）");
+        // 0 是"关闭探索测量席"的显式动作（退回旧行为），必须能存住
+        if (explore != null && (explore < 0 || explore > 3))
+            return bad("exploreSeats 需在 0~3（0=关闭探索测量席，无有效实测的家不再拿到测量席位）");
+        if (speedAge != null && (speedAge < 0 || speedAge > 8760))
+            return bad("speedMaxAgeHours 需在 0~8760（0=关闭保鲜期判定，旧实测永久有效）");
         if (cWin != null && (cWin < 0 || cWin > 1440)) return bad("chronicWindowMinutes 需在 0~1440（0=关闭慢性限流层）");
         if (cMin != null && (cMin < 3 || cMin > 100)) return bad("chronicMinSamples 需在 3~100");
         if (cRatio != null && (cRatio < 0.05 || cRatio > 1.0)) return bad("chronicSeatBlockRatio 需在 0.05~1.0");
         if (en == null && band == null && slow == null && tie == null && seatCap == null && capPct == null
-                && minSeats == null && cWin == null && cMin == null && cRatio == null)
-            return bad("enabled/bandSize/slowTtftMs/speedTieRatio/providerSeatCap/providerCapPct/minSeats/慢性限流参数 至少给一个");
+                && minSeats == null && explore == null && speedAge == null
+                && cWin == null && cMin == null && cRatio == null)
+            return bad("enabled/bandSize/slowTtftMs/speedTieRatio/providerSeatCap/providerCapPct/minSeats/"
+                    + "exploreSeats/speedMaxAgeHours/慢性限流参数 至少给一个");
         try {
             configService.persist(cfg -> {
                 GatewayConfig.Defaults d = cfg.getDefaults();
@@ -1009,6 +1020,8 @@ public class AdminController {
                 if (seatCap != null) d.setShareProviderSeatCap(seatCap);
                 if (capPct != null) d.setShareProviderCapPct(capPct);
                 if (minSeats != null) d.setShareMinSeats(minSeats);
+                if (explore != null) d.setShareExploreSeats(explore);
+                if (speedAge != null) d.setSpeedSampleMaxAgeHours(speedAge);
                 if (cWin != null) d.setChronicRateWindowMinutes(cWin);
                 if (cMin != null) d.setChronicRateMinSamples(cMin);
                 if (cRatio != null) d.setChronicSeatBlockRatio(cRatio);
@@ -1023,6 +1036,8 @@ public class AdminController {
             out.put("providerSeatCap", nd.getShareProviderSeatCap());
             out.put("providerCapPct", nd.getShareProviderCapPct());
             out.put("minSeats", nd.getShareMinSeats());
+            out.put("exploreSeats", nd.getShareExploreSeats());
+            out.put("speedMaxAgeHours", nd.getSpeedSampleMaxAgeHours());
             out.put("chronicWindowMinutes", nd.getChronicRateWindowMinutes());
             out.put("chronicMinSamples", nd.getChronicRateMinSamples());
             out.put("chronicSeatBlockRatio", nd.getChronicSeatBlockRatio());

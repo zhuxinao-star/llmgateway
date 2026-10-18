@@ -404,17 +404,43 @@ public class StatsDao {
         }
     }
 
+    /** 一条带时刻的首字样本。回填速度历史必须同时带时刻——只知道"中位数是多少"而不知道"它是哪天测的"，
+     *  就没法判它新不新鲜（2026-10-14 实锤：agnes 挂在 09-28 一次同秒压测算出的 12727ms 上出不了并列带）。 */
+    public record TtftSample(long ts, long ttftMs) {}
+
     /** 最近 N 条成功请求的 TTFT（常规上下文）：进程重启后给分摊抽签门槛/速度系数补"最近实测"样本。
-     *  三条口径与实时评分侧保持一致，否则回填会把实时侧刻意排除的东西又塞回来：
+     *  四条口径与实时评分侧保持一致，否则回填会把实时侧刻意排除的东西又塞回来：
      *   - 排除 client='probe'（巡检 ping 不代表真实请求速度，实时侧 recordSuccess 同样不进窗）；
      *   - 排除 ttft_ms < minTtftMs 的测量伪值（修复前流式路径把首字记成 0~3ms）；
-     *   - 模型按大小写不敏感匹配（同一模型的不同拼法共用一份速度历史，别把样本切两半）。 */
-    public List<Long> recentOkTtfts(String providerId, String model, int limit, long maxInputTokens, long minTtftMs) {
-        String sql = "SELECT ttft_ms FROM request_log WHERE provider_id=? AND lower(model_real)=lower(?) AND status='OK' " +
-                "AND ttft_ms IS NOT NULL AND ttft_ms >= ? AND (client IS NULL OR client NOT IN ('probe','selfcheck','reconcile')) " +
+     *   - 只取 ts >= minTs 的样本（minTs≤0＝不设时间界）：留了条数上限而不留时间界，旧样本会永远占着
+     *     "最近 N 条"这个坑——实测 09-28 那一发 java 压测（同一秒排队、11.6~16.9s）十七天后仍霸占
+     *     agnes 的全部 8 格窗口，把它钉在并列带外，而"没席位→没流量→没新样本"闭环让它永远翻不了身；
+     *   - 模型按大小写不敏感匹配（同一模型的不同拼法共用一份速度历史，别把样本切两半）。
+     *  新→旧返回，第 0 条的 ts 就是"这套样本的时刻"。 */
+    public List<TtftSample> recentOkTtfts(String providerId, String model, int limit, long maxInputTokens,
+                                          long minTtftMs, long minTs) {
+        String sql = "SELECT ttft_ms, ts FROM request_log WHERE provider_id=? AND lower(model_real)=lower(?) AND status='OK' " +
+                "AND ttft_ms IS NOT NULL AND ttft_ms >= ? AND ts >= ? " +
+                "AND (client IS NULL OR client NOT IN ('probe','selfcheck','reconcile')) " +
                 "AND (tokens_in IS NULL OR tokens_in <= ?) ORDER BY id DESC LIMIT ?";
         try {
-            return db.queryList(sql, rs -> rs.getLong(1), providerId, model, minTtftMs, maxInputTokens, limit);
+            return db.queryList(sql, rs -> new TtftSample(rs.getLong(2), rs.getLong(1)),
+                    providerId, model, minTtftMs, minTs, maxInputTokens, limit);
+        } catch (SQLException e) {
+            return List.of();
+        }
+    }
+
+    /** 体检流量（client='probe'）的首字样本：只参与"判定"，永不参与结算（不进分数、不进并列带参照系、
+     *  不进份额）。用途见 PolicyService.probeVetoesExplore——真实流量缺席的家靠它证明"确实慢"或"并不慢"。 */
+    public List<TtftSample> recentProbeTtfts(String providerId, String model, int limit,
+                                             long minTtftMs, long minTs) {
+        String sql = "SELECT ttft_ms, ts FROM request_log WHERE provider_id=? AND lower(model_real)=lower(?) AND status='OK' " +
+                "AND ttft_ms IS NOT NULL AND ttft_ms >= ? AND ts >= ? AND client='probe' " +
+                "ORDER BY id DESC LIMIT ?";
+        try {
+            return db.queryList(sql, rs -> new TtftSample(rs.getLong(2), rs.getLong(1)),
+                    providerId, model, minTtftMs, minTs, limit);
         } catch (SQLException e) {
             return List.of();
         }

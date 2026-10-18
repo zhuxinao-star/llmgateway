@@ -163,6 +163,9 @@ public class GatewayController {
         try {
             ForwardEngine.ForwardResult lastFail = null;
             long requestStart = System.nanoTime();
+            // 落库时长只认这一把钟：total_ms 与 ttft_ms 必须同源，否则"总时长比首字还短"会结构性出现
+            //（旧流式路径从 streamToClient 起算，把 execute 里的上游首字等待整段漏掉，307 行实证）。
+            final long requestStartMs = System.currentTimeMillis();
             int attemptNo = 0;
             // ---- Fix C：整单在 totalBudget 内做有限轮"耐心 failover"。首轮全败且失败属可重试类
             //  （429/5xx/超时/网络）时，退避（上游 Retry-After 优先，无则固定小退避）后按 pass1 学到的
@@ -242,7 +245,7 @@ public class GatewayController {
                             PolicyService.Candidate winner = winnerOf(r, c);
                             // #11 并发位一直占到流排空结束（execute 已保留 c 的额度未释放，异常也要还）
                             try {
-                                streamToClient(model, winner, r, attemptNo, profile, client, req, response, cmp.compressTag(), ka);
+                                streamToClient(model, winner, r, attemptNo, profile, client, req, response, cmp.compressTag(), ka, requestStartMs);
                             } finally {
                                 policyService.releaseInflight(c.providerId(), c.model());
                             }
@@ -292,9 +295,12 @@ public class GatewayController {
     private void streamToClient(String model, PolicyService.Candidate c,
                                  ForwardEngine.ForwardResult r, int attemptNo,
                                  String profile, String client, Map<String, Object> req,
-                                 HttpServletResponse response, String compress, SseKeepAlive ka) throws IOException {
+                                 HttpServletResponse response, String compress, SseKeepAlive ka,
+                                 long requestStartMs) throws IOException {
         GatewayConfig.Defaults d = configService.snapshot().config.getDefaults();
-        long startMs = System.currentTimeMillis();
+        // relayStartMs 只用来量"这段流在网关手里活了多久"（心跳窗口、首字偏移）；
+        // 落库的 total_ms 必须从 requestStartMs 起算，才和 ttft_ms（含 execute 里的上游等待）同一把钟。
+        long relayStartMs = System.currentTimeMillis();
         // 延迟提交：此刻候选已真正开始吐流（execute 返回 STREAM = TTFT 窗口内拿到首字），
         // 才 commit 200 SSE 头 + 拉起 ticker，覆盖后续 token 间空档。此前任何硬失败仍回真实状态码。
         if (ka != null) {
@@ -344,7 +350,7 @@ public class GatewayController {
                                 lastRealAt == 0 ? d.getStreamHeartbeatTimeoutMs() : afterTokenWinMs,
                                 c.providerId(), c.model());
                         statsService.logRequest(model, c.providerId(), c.model(), (int) (r.ttftMs / 1_000_000),
-                                (int) (now - startMs), null, null, "STREAM_TIMEOUT", attemptNo, profile, "heartbeat timeout", client,
+                                (int) (now - requestStartMs), null, null, "STREAM_TIMEOUT", attemptNo, profile, "heartbeat timeout", client,
                                 compress, null, null, null, c.channelId());
                         policyService.recordFailure(c.providerId(), c.model(), c.channelId(), 0, "stream heartbeat timeout", client);
                         if (pendingOut != null) {      // 已收到的完整行仍透传；客户端可能已断，写失败仅忽略
@@ -366,12 +372,12 @@ public class GatewayController {
                     // 死流兜底：keep-alive 行能骗过 pollLine 超时（pollLine 只在"完全无数据"时超时）。
                     // 若真内容窗口耗尽（如每秒一条注释行的死流），在这里主动掐断。
                     long win = lastRealAt == 0 ? d.getStreamHeartbeatTimeoutMs() : afterTokenWinMs;
-                    if (System.currentTimeMillis() - (lastRealAt == 0 ? startMs : lastRealAt) > win) {
+                    if (System.currentTimeMillis() - (lastRealAt == 0 ? relayStartMs : lastRealAt) > win) {
                         long now = System.currentTimeMillis();
                         log.warn("流内长时间无真内容（keep-alive 行续命 {}ms），掐断 {}/{}",
-                                now - (lastRealAt == 0 ? startMs : lastRealAt), c.providerId(), c.model());
+                                now - (lastRealAt == 0 ? relayStartMs : lastRealAt), c.providerId(), c.model());
                         statsService.logRequest(model, c.providerId(), c.model(), (int) (r.ttftMs / 1_000_000),
-                                (int) (now - startMs), null, null, "STREAM_TIMEOUT", attemptNo, profile, "no real content window exceeded", client,
+                                (int) (now - requestStartMs), null, null, "STREAM_TIMEOUT", attemptNo, profile, "no real content window exceeded", client,
                                 compress, null, null, null, c.channelId());
                         policyService.recordFailure(c.providerId(), c.model(), c.channelId(), 0, "stream no real content timeout", client);
                         if (pendingOut != null) {      // 已收到的完整行仍透传；客户端可能已断，写失败仅忽略
@@ -405,7 +411,7 @@ public class GatewayController {
                 // 导致客户端收不到 finish_reason/usage，报 "Stream ended without finish_reason"、tokens=0+0。
                 List<String> events = adaptor.transformStreamEvent(cur);
                 lastRealAt = System.currentTimeMillis();
-                if (firstTokenAt == null) firstTokenAt = String.valueOf(lastRealAt - startMs);
+                if (firstTokenAt == null) firstTokenAt = String.valueOf(lastRealAt - relayStartMs);
                 for (String ol : events) {
                     // 残行防线：非 [DONE] 的 data: 行必须先解析成完整 JSON。上游中途断流时
                     // readLine 会把无换行的半截残行交出来——在这里直接丢弃、绝不下发（DSH/pi-ai
@@ -467,7 +473,7 @@ public class GatewayController {
                         c.providerId(), c.model());
                 Map<String, Object> partialUsage = usage != null ? usage : adaptor.extractUsage(null);
                 statsService.logRequest(model, c.providerId(), c.model(), (int) (r.ttftMs / 1_000_000),
-                        (int) (now - startMs),
+                        (int) (now - requestStartMs),
                         partialUsage == null ? null : Json.longVal(partialUsage.get("prompt_tokens")),
                         partialUsage == null ? null : Json.longVal(partialUsage.get("completion_tokens")),
                         "STREAM_INCOMPLETE", attemptNo, profile, "upstream stream ended without finish_reason", client,
@@ -492,7 +498,7 @@ public class GatewayController {
                     : ForwardEngine.streamTtftMs(r, Long.parseLong(firstTokenAt));
             Map<String, Object> finalUsage = usage != null ? usage : adaptor.extractUsage(null);
             recordSuccessAndLog(c, model, ttft, finalUsage, "OK", attemptNo, profile,
-                    System.currentTimeMillis() - startMs, client, compress);
+                    System.currentTimeMillis() - requestStartMs, client, compress);
             // 流式输出质量自反馈（同非流式：截断/空回复软失败降权 + 早停嫌疑）
             judgeStreamQuality(c, req, streamFinish, streamSawContent, streamSawToolUse, finalUsage,
                     streamContentLen, client, compress);
@@ -501,7 +507,7 @@ public class GatewayController {
             // → 语义是"客户端断开"，如实记 CLIENT_ABORTED，不再冒充模糊的 STREAM_ABORTED
             log.warn("客户端断开(流式) {}/{}: {}", c.providerId(), c.model(), e.getMessage());
             statsService.logRequest(model, c.providerId(), c.model(), null,
-                    (int) (System.currentTimeMillis() - startMs), null, null, "CLIENT_ABORTED", attemptNo, profile, e.getMessage(), client,
+                    (int) (System.currentTimeMillis() - requestStartMs), null, null, "CLIENT_ABORTED", attemptNo, profile, e.getMessage(), client,
                     compress, null, null, null, c.channelId());
         }
     }
@@ -570,7 +576,7 @@ public class GatewayController {
             out = Json.longVal(usage.get("completion_tokens"));
         }
         policyService.recordSuccess(c.providerId(), c.model(), c.channelId(),
-                ttftMs, in, out, false, client, Math.max(1, totalMs));
+                ttftMs, in, out, false, client, totalMs);
         statsService.logRequest(model, c.providerId(), c.model(), ttftMs == null ? null : (int) (long) ttftMs,
                 (int) totalMs, in, out, status, attempts, profile,
                 "CLIENT_ABORTED".equals(status) ? "client disconnected before delivery" : null, client,
@@ -781,7 +787,7 @@ public class GatewayController {
             }
             // SUCCESS：原样透传上游 JSON（含 data[].url / b64_json）
             policyService.recordSuccess(c.providerId(), c.model(), c.channelId(),
-                    r.ttftMs / 1_000_000, null, null, false, client, Math.max(1, r.ttftMs / 1_000_000));
+                    r.ttftMs / 1_000_000, null, null, false, client, r.ttftMs / 1_000_000);
             statsService.logRequest(model, c.providerId(), c.model(),
                     (int) (r.ttftMs / 1_000_000), (int) (r.ttftMs / 1_000_000),
                     null, null, "OK", attempt + 1, null, null, client, null, null, null, null, c.channelId());
@@ -851,7 +857,7 @@ public class GatewayController {
             Long in = usage == null ? null : Json.longVal(usage.get("prompt_tokens"));
             Long out = usage == null ? null : Json.longVal(usage.get("completion_tokens"));
             policyService.recordSuccess(c.providerId(), c.model(), c.channelId(),
-                    r.ttftMs / 1_000_000, in, out, false, client, Math.max(1, r.ttftMs / 1_000_000));
+                    r.ttftMs / 1_000_000, in, out, false, client, r.ttftMs / 1_000_000);
             statsService.logRequest(model, c.providerId(), c.model(),
                     (int) (r.ttftMs / 1_000_000), (int) (r.ttftMs / 1_000_000),
                     in, out, "OK", attempt + 1, null, null, client, null, null, null, null, c.channelId());

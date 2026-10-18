@@ -530,7 +530,7 @@ public class ContextCompressor {
             if ("OK".equals(status)) {
                 // ttft 传 null：非流式压缩无有效首字样本，喂进速度 EWMA 会失真；usage/配额照常累计
                 policyService.recordSuccess(s.candidate.providerId(), s.candidate.model(), s.candidate.channelId(),
-                        null, in, out, false, recordClient, Math.max(1, totalMs));
+                        null, in, out, false, recordClient, totalMs);
             }
             statsService.logRequest(compressorModel, s.candidate.providerId(), s.candidate.model(),
                     null, (int) totalMs, in, out, status, attempts, null, error, recordClient,

@@ -44,6 +44,23 @@ public class RankTraceTest {
         if (!ok) failures++;
     }
 
+    /** 失败现场：逐行给出席位/原因码/速度状态/文案，判"为什么没摊到我"不靠猜 */
+    static String dbg(PolicyService.RankTrace t) {
+        StringBuilder sb = new StringBuilder("seats=").append(t.seatsStrict).append('+')
+                .append(t.seatsRelaxed).append('+').append(t.seatsExplore).append(" rows=[");
+        for (PolicyService.RankTrace.Row r : t.rows) {
+            sb.append(r.provider).append('/').append(r.model).append('{')
+                    .append("in=").append(r.inBand)
+                    .append(",out=").append(r.bandOut)
+                    .append(",st=").append(r.state)
+                    .append(",sp=").append(r.speedState)
+                    .append(",note=").append(r.note == null ? "null"
+                            : r.note.substring(0, Math.min(20, r.note.length())))
+                    .append("} ");
+        }
+        return sb.append(']').toString();
+    }
+
     /** 界面要连乘校验的因子键（不含 ttftEstMs/priority 等诊断附值） */
     static final List<String> FACTOR_KEYS = List.of(
             "P_priority", "H_health", "Q_quality", "S_ttft", "T_throughput", "C_costTier",
@@ -66,6 +83,9 @@ public class RankTraceTest {
               # ⑤ 那条测的是"掉出并列带就撤席"，而席位下限会把带外最快的家再补回来（同一条断言两种规则）；
               # 补席本身由 ShareSeatFloorTest 单独钉，这里显式关掉，两条用例才各测一件事。
               shareMinSeats: 0
+              # 同上：探索测量席会把「没被有效测过」的候选补进席，而本套用例要钉的是
+              # "带内 3 席 + 未进席原因计数"——探索席由 SpeedSampleFreshnessTest 单独钉。
+              shareExploreSeats: 0
               chronicRateMinSamples: 8
               chronicSeatBlockRatio: 0.3
             providers:
@@ -339,14 +359,17 @@ public class RankTraceTest {
         store.commit(t);
 
         long from = t.ts - 60_000, to = t.ts + 600_000;
-        // asyncWrite 是排队写：轮询到看见为止，不拿"管道退出码"当成功
-        int seen = 0;
-        for (int i = 0; i < 100 && (seen = store.observeShare(from, to, null, null).samples()) == 0; i++)
-            Thread.sleep(50);
-        check("决策快照已落采样库", seen >= 1, "samples=" + seen);
-
+        // asyncWrite 是排队写：要轮询到「库」里看见为止。
+        // 拿带内存环的 store 轮询等于没等——刚 commit 那条立刻在内存里可见，循环当场退出，
+        // 异步写还没落库，下一行换成只认库的实例就采到 0 条（2026-10-16 的随机失败就是这个形状）。
         RankTraceStore afterRestart = new RankTraceStore(db, cs);   // 内存空手，只剩库
-        com.gw.policy.RankTraceStore.ShareObservation obs = afterRestart.observeShare(from, to, null, null);
+        com.gw.policy.RankTraceStore.ShareObservation obs =
+                afterRestart.observeShare(from, to, null, null);
+        for (int i = 0; i < 100 && obs.samples() == 0; i++) {
+            Thread.sleep(50);
+            obs = afterRestart.observeShare(from, to, null, null);
+        }
+        check("决策快照已落采样库", obs.samples() >= 1, "samples=" + obs.samples());
         List<PolicyService.RankTrace.Row> band = new ArrayList<>();
         for (PolicyService.RankTrace.Row r : t.rows) if (r.inBand) band.add(r);
         check("重启后仍读得到应得份额（来自库，不是内存）",
@@ -364,10 +387,10 @@ public class RankTraceTest {
                 "mem+db=" + store.observeShare(from, to, null, null).samples() + " db=" + obs.samples());
         check("未进席的行带原因码（候选 5 个模型 > 席 3）",
                 t.rows.stream().filter(r -> !r.inBand && "OK".equals(r.state))
-                        .allMatch(r -> r.bandOut != null), "");
+                        .allMatch(r -> r.bandOut != null), dbg(t));
         check("未进席原因分类计数有数（界面按码汇总，不猜文案）",
                 !obs.bandOut().isEmpty() && obs.bandOut().values().stream().mapToInt(Integer::intValue).sum() > 0,
-                "bandOut=" + obs.bandOut());
+                "bandOut=" + obs.bandOut() + " " + dbg(t));
         check("按来源过滤：claude-code 有样本、别家来源为 0",
                 obs.samples() > 0 && afterRestart.observeShare(from, to, "other-tool", null).samples() == 0, "");
     }
@@ -539,17 +562,26 @@ public class RankTraceTest {
                 -> "beta".equals(s.candidate.providerId())), "res=" + res.size());
     }
 
-    /** 给条目盖一个"本进程实测出来的最近首字"（连环形窗和时间戳一起给：
-     *  只改中位数、不给 medianTs，会被当成跨重启的旧值重新回填，测的就不是这条路了）。 */
+    /** 给条目盖一个"本进程实测出来的最近首字"（连环形窗、每条样本的时刻和采样戳一起给：
+     *  只改中位数、不给这些，会被当成跨重启的旧值重新回填，测的就不是这条路了）。
+     *  单值调用在这里补成三条（中位数不变）：判定要窗内 ≥3 条才认——窗里只有 1~2 条时
+     *  一条尖峰就占掉一半证据，speedState 判 STALE 而不是实测，fixture 若只给一两条，
+     *  测的其实是"证据不足"那条路，不是"实测快/慢"。 */
     static void setMeasured(PolicyService.EntryRuntime er, long... ttftsMs) {
+        if (ttftsMs.length == 1) ttftsMs = new long[]{ttftsMs[0], ttftsMs[0], ttftsMs[0]};
         er.recentTtftWin = new long[Math.max(8, ttftsMs.length)];
-        for (int i = 0; i < ttftsMs.length; i++) er.recentTtftWin[i] = ttftsMs[i];
+        er.recentTtftTs = new long[er.recentTtftWin.length];
+        long now = System.currentTimeMillis();
+        for (int i = 0; i < ttftsMs.length; i++) {
+            er.recentTtftWin[i] = ttftsMs[i];
+            er.recentTtftTs[i] = now;      // 逐样本记时刻：判定按保鲜期逐条过滤， fixture 要的是"全都刚测的"
+        }
         er.recentTtftIdx = ttftsMs.length % er.recentTtftWin.length;
         er.recentTtftCount = ttftsMs.length;
         long[] s = ttftsMs.clone();
         java.util.Arrays.sort(s);
         er.recentTtftMedian = s.length % 2 == 1 ? s[s.length / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2.0;
-        er.medianTs = System.currentTimeMillis();
+        er.lastSpeedSampleTs = now;
         er.ttftSeeded = true;
     }
 
@@ -743,9 +775,10 @@ public class RankTraceTest {
     /** ⑨ 跨重启恢复的旧中位数不许"自我免疫"。
      *  旧实现只要 recentTtftMedian ≥ 0 就跳过日志回填：上周一次 20s 抽风被存进快照，重启后它挡住
      *  所有新证据，模型永远停在撤席线外（没席位→没流量→没新样本→永远"慢"）。
-     *  现在只有"本进程 3 小时内算出的"中位数才算新鲜，过期的用 request_log 重算顶掉。
-     *  顺带钉两条回填口径：模型名大小写不敏感（上游目录里就是 DeepSeek-M 这种写法），
-     *  以及修复前流式路径记下的 3ms 伪样本和巡检流量都不许进速度历史。 */
+     *  现在只有"保鲜期（speedSampleMaxAgeHours，默认 72 小时）内的实测"才算新鲜，过期的用 request_log 重算顶掉。
+     *  顺带钉三条回填口径：模型名大小写不敏感（上游目录里就是 DeepSeek-M 这种写法），修复前流式路径记下的
+     *  3ms 伪样本和巡检流量都不许进速度历史，以及重算后盖的是"样本自己的时刻"而不是"本次计算的时刻"
+     *  （盖计算时刻＝快照每 60 秒重写一次就把旧值洗白成最新实测，2026-10-14 的实锤）。 */
     static void staleRestoredMedianIsReplacedByLog(Database db, ConfigService cs) throws Exception {
         StatsDao dao = new StatsDao(db);
         long now = System.currentTimeMillis();
@@ -760,25 +793,26 @@ public class RankTraceTest {
         dao.insertRequestLog(now - 10_000, "DeepSeek-M", "gamma", "DeepSeek-M",
                 5000, 900, 100L, 20L, "OK", 1, "auto", null, "probe", null, "T-seed-5", 200, null, "k1");
 
-        List<Long> hist = await(() -> dao.recentOkTtfts("gamma", "deepseek-m", 8, 10_000, 50),
+        List<StatsDao.TtftSample> hist = await(() -> dao.recentOkTtfts("gamma", "deepseek-m", 8, 10_000, 50, 0),
                 l -> l.size() >= 3);
         check("回填查库大小写不敏感（配置里的小写名也拿得到上游大写名的历史）",
                 hist.size() == 3, "hist=" + hist);
         check("测量伪值（3ms）与巡检样本都不进速度历史",
-                hist.stream().noneMatch(v -> v < 50 || v >= 5000), "hist=" + hist);
+                hist.stream().noneMatch(s -> s.ttftMs() < 50 || s.ttftMs() >= 5000), "hist=" + hist);
 
         PolicyService ps2 = new PolicyService(cs, dao, null);
         PolicyService.EntryRuntime er = ps2.entry("gamma", "DeepSeek-M");
         er.recentTtftMedian = 20_000;                    // 上周进快照的"抽风中位数"
-        er.medianTs = now - 10 * 3600_000L;              // 早已过新鲜期
+        er.lastSpeedSampleTs = now - 100 * 3600_000L;     // 一百小时前的样本，早已过保鲜期
         PolicyService.RankTrace t = new PolicyService.RankTrace();
         ps2.rank(List.of(new PolicyService.Candidate("gamma", "DeepSeek-M", "k1", 3, null),
                 new PolicyService.Candidate("alpha", "a1", "k1", 1, null)),
                 "auto", false, null, null, false, null, t);
         check("过期中位数被日志重算取代（300/400/500 → 400，不是 20000）",
                 er.recentTtftMedian == 400, "median=" + er.recentTtftMedian);
-        check("重算出的中位数盖上时间戳（下一次才知道它新不新鲜）",
-                er.medianTs >= now - 1000, "medianTs=" + er.medianTs);
+        check("重算后盖的是最近一枚样本自己的时刻（now-20s），不是『本次计算』的一刻",
+                Math.abs(er.lastSpeedSampleTs - (now - 20_000)) < 5_000, "ts=" + er.lastSpeedSampleTs
+                        + " 期望≈" + (now - 20_000));
         check("速度证据恢复后重新拿到抽签席（旧中位数再也无法永久逐出快模型）",
                 row(t, "gamma", "DeepSeek-M").inBand, "bandOut=" + row(t, "gamma", "DeepSeek-M").bandOut);
     }

@@ -258,6 +258,11 @@ public class GatewayConfig {
         private int shareMinSeats = 3;              // 抽签席下限：并列带内不足这么多家时，按实测首字把带外的家补进席
                                                     // （0=关闭，退回"速度说了算"）。速度只决定谁先入座，不该决定一共几个座——
                                                     // 否则本组一发快样本就能把池子砍到一两家，其余家永远拿不到流量也永远拿不到新样本
+        private int speedSampleMaxAgeHours = 72;    // 实测速度样本保鲜期（小时，0=关闭过期判定）：超过它的首字中位数
+                                                    // 不再当"最新实测"用——按"无有效实测"参加抽签。挡住"十七天前一次压测排队
+                                                    // 把一家钉死在 12.7s、从此永远拿不到席位也永远拿不到新样本"
+        private int shareExploreSeats = 1;          // 探索测量席（家，0=关闭）：席位被高分家占满时，仍给"无有效实测"的家补这么几席
+                                                    // ——没被量化过不是"慢"的证据，但不给一发就永远量化不了（份额仍只按偏好分）
         private double shareProviderCapPct = 0.35;  // 乙·供应商份额封顶：一家的应得份额合计上限（0=不限）。超出部分按权重回灌给未达线的家
         private int chronicRateWindowMinutes = 60;  // 慢性限流窗口（分钟，0=关闭该层）：按 request_log 真实流量算每家长期 429 占比，重启不丢
         private int chronicRateMinSamples = 8;      // 慢性判定所需最少真实样本（防"3 发里 2 发 429"这种小样本误判）
@@ -379,6 +384,12 @@ public class GatewayConfig {
 
         public int getShareMinSeats() { return shareMinSeats; }
         public void setShareMinSeats(int v) { this.shareMinSeats = v; }
+
+        public int getSpeedSampleMaxAgeHours() { return speedSampleMaxAgeHours; }
+        public void setSpeedSampleMaxAgeHours(int v) { this.speedSampleMaxAgeHours = v; }
+
+        public int getShareExploreSeats() { return shareExploreSeats; }
+        public void setShareExploreSeats(int v) { this.shareExploreSeats = v; }
 
         public double getShareProviderCapPct() { return shareProviderCapPct; }
         public void setShareProviderCapPct(double v) { this.shareProviderCapPct = v; }

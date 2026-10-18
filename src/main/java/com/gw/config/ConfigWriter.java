@@ -78,6 +78,10 @@ public final class ConfigWriter {
         y.append("  shareProviderCapPct: ").append(d.getShareProviderCapPct()).append('\n');
         // 抽签席下限：0＝关闭补席（退回"速度说了算"），同样是有意的动作，须存得住
         y.append("  shareMinSeats: ").append(d.getShareMinSeats()).append('\n');
+        // 样本保鲜期＝0 是"关掉过期判定、旧值永远算数"的显式动作；探索席＝0 是"不再为未测量的家留座"。
+        // 两者关掉都是有决定的，必须存得住，所以恒写。
+        y.append("  speedSampleMaxAgeHours: ").append(d.getSpeedSampleMaxAgeHours()).append('\n');
+        y.append("  shareExploreSeats: ").append(d.getShareExploreSeats()).append('\n');
         // 慢性限流（读库长窗口 429 占比）：窗口=0 即关闭该层，仍照写——关掉这个动作本身要存得住
         y.append("  chronicRateWindowMinutes: ").append(d.getChronicRateWindowMinutes()).append('\n');
         y.append("  chronicRateMinSamples: ").append(d.getChronicRateMinSamples()).append('\n');
