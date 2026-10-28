@@ -1,5 +1,6 @@
 package com.gw.config;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
@@ -8,6 +9,10 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 @Configuration
 public class WebConfig implements WebMvcConfigurer {
+
+    /** 平台单体模式：根路径归门户页，网关不再把 / 重定向到自己的管理页。独立运行保持原行为。 */
+    @Value("${gateway.portal-root:false}")
+    private boolean portalRoot;
     /**
      * CORS 白名单（原为 allowedOrigins("*")：本机任意网页可跨源驱动 /api 写接口）。
      * 管理 UI 与网关同源（127.0.0.1:8317），本就吃不到 CORS；这里只保留本机回环
@@ -29,6 +34,8 @@ public class WebConfig implements WebMvcConfigurer {
     public void addViewControllers(ViewControllerRegistry registry) {
         registry.addRedirectViewController("/ui", "/ui/index.html").setStatusCode(HttpStatus.FOUND);
         registry.addRedirectViewController("/ui/", "/ui/index.html").setStatusCode(HttpStatus.FOUND);
-        registry.addRedirectViewController("/", "/ui/index.html").setStatusCode(HttpStatus.FOUND);
+        if (!portalRoot) {
+            registry.addRedirectViewController("/", "/ui/index.html").setStatusCode(HttpStatus.FOUND);
+        }
     }
 }

@@ -39,9 +39,25 @@ echo [jar missing] run scripts\build.bat first
 exit /b 1
 
 :have_jar
-powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort %GW_PORT% -State Listen -ErrorAction SilentlyContinue) { exit 9 }"
-if errorlevel 9 goto :already_running
+rem Is the port already taken, and if so by whom? _gw.bat reads the listener's command
+rem line, because another java program on this machine uses the same port and starting
+rem a second gateway next to it would only fail to bind.
+call "%~dp0_gw.bat" %GW_PORT%
+if not defined GW_PID goto :launch
+if not "%GW_OWN%"=="1" goto :port_taken
 
+echo [already running] http://%GW_HOST%:%GW_PORT%/ui/index.html
+echo                   PID %GW_PID% - stop it first with scripts\stop.bat
+exit /b 0
+
+:port_taken
+echo [port busy] port %GW_PORT% is held by another program, not llmGateway:
+echo             %GW_PROC%
+echo             Nothing was started. Either stop that program, or give the gateway
+echo             its own port: set GW_PORT=9000 (scripts\doctor.bat shows the effect).
+exit /b 1
+
+:launch
 rem Create the folders the app writes into.
 if not exist "%GW_LOG_DIR%" mkdir "%GW_LOG_DIR%"
 for %%i in ("%GW_DB_PATH%") do set "DB_DIR=%%~dpi"
@@ -53,8 +69,4 @@ echo [java]     %JAVA_DIR%
 echo [logs]     %GW_LOG_DIR%\app.log
 echo [db]       %GW_DB_PATH%
 echo [port]     %GW_PORT% from %PORT_SRC%
-exit /b 0
-
-:already_running
-echo [already running] http://%GW_HOST%:%GW_PORT%/ui/index.html
 exit /b 0

@@ -50,6 +50,9 @@ goto :java_done
 
 :java_ok
 echo java            : %JAVA_DIR%
+if not defined JAVA_NTRIED goto :java_version
+echo                 : %JAVA_NTRIED% java candidates searched, first JDK 21+ one wins
+:java_version
 if not defined JAVA_NUM goto :java_done
 if not "%JAVA_VERDICT%"=="OK" goto :java_old
 echo version         : %JAVA_NUM% - OK, 21 or newer
@@ -88,11 +91,36 @@ goto :port_done
 echo                 : GW_PORT is injected into the JVM, so the app binds it
 
 :port_done
-powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort %GW_PORT% -State Listen -ErrorAction SilentlyContinue) { Write-Output 'port state      : BUSY, a gateway is already listening' } else { Write-Output 'port state      : free' }"
+rem Who actually holds the port right now, and is it ours? Same helper the
+rem start/stop/build scripts use, so doctor reports exactly what they will act on.
+call "%~dp0_gw.bat" %GW_PORT%
+if not defined GW_PID goto :port_free
+if "%GW_OWN%"=="1" goto :port_ours
+if "%GW_OWN%"=="0" goto :port_other
+echo port state      : BUSY - PID %GW_PID%, identity unclear: %GW_PROC%
+echo                 : stop.bat will refuse to kill an unidentified process.
+goto :port_footer
+
+:port_ours
+echo port state      : BUSY - llmGateway is listening, PID %GW_PID%
+goto :port_footer
+
+:port_other
+echo port state      : BUSY - ANOTHER PROGRAM, not llmGateway, holds PID %GW_PID%
+echo                 : %GW_PROC%
+echo                 : the gateway cannot bind this port while that runs. Either stop
+echo                 : it, or set GW_PORT to a port of its own.
+goto :port_footer
+
+:port_free
+echo port state      : free, nothing listens on %GW_PORT%
+
+:port_footer
 echo.
 echo To change anything, set an environment variable before running a script:
 echo   set GW_JDK=D:\java\jdk-21
 echo   set GW_MVN=C:\maven\bin\mvn.cmd
+echo   set GW_MVN_SETTINGS=C:\maven\conf\settings.xml
 echo   set GW_BASE=D:\llmgateway-data
 echo   set GW_PORT=9000
 echo   set GW_HOST=0.0.0.0

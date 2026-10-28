@@ -31,9 +31,15 @@ echo               directory, or drop a portable jdk-21.* folder into tools\
 exit /b 1
 
 :version_ok
-powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort %GW_PORT% -State Listen -ErrorAction SilentlyContinue) { exit 9 }"
-if not errorlevel 9 goto :port_free
-echo [service running] run scripts\stop.bat first, the jar file is locked
+rem Only our own JVM locks target\llmGateway.jar. Another program on the same
+rem port does not, so the build is refused only when the listener is this
+rem project's gateway - or when _gw.bat could not tell who it is.
+call "%~dp0_gw.bat" %GW_PORT%
+if not defined GW_PID goto :port_free
+if "%GW_OWN%"=="0" goto :port_free
+echo [service running] port %GW_PORT% is already held (PID %GW_PID%): %GW_PROC%
+echo                   If that is llmGateway, the jar file is locked - stop it
+echo                   with scripts\stop.bat and build again.
 exit /b 9
 
 :port_free
