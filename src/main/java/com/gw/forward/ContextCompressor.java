@@ -39,13 +39,17 @@ public class ContextCompressor {
 
     private static final Logger log = LoggerFactory.getLogger(ContextCompressor.class);
 
-    /** 压缩提示词：面向"接着干活"设计——保留任务脉络、关键决定与未完成事项，丢弃过程性细节 */
+    /** 压缩提示词：面向"接着干活"设计——保留任务脉络、关键决定与未完成事项，丢弃过程性细节。
+     *  2026-11-18 增补结论状态口径：模型"已向用户宣布过的结论"是防重复的锚——丢了它，
+     *  下一轮就会把同一发现当新消息重新宣布、重新验证（实测"找到问题了"刷屏的推手之一）。 */
     private static final String COMPRESS_PROMPT = """
             你是会话压缩器。下面是 AI 助手与用户的历史对话（含工具调用记录）。
             请把它压缩成一份给"下一轮对话"用的上下文摘要，让助手读了能无缝继续当前任务。
             必须保留：任务目标与背景、已完成的关键步骤及其结果、重要的文件路径/命令/配置值、
             未完成事项与下一步计划、用户明确的偏好或纠正。
-            必须丢弃：寒暄、重复内容、大段代码/日志原文（只留结论与关键行）、无关的中间探索。
+            助手已向用户宣布过的结论必须保留，并注明状态（已发现/已修复/已验证/已否决）；
+            同一结论重复出现多次时只写一条，但绝不能整个丢弃。
+            必须丢弃：寒暄、纯粹的过程叙述、大段代码/日志原文（只留结论与关键行）、无关的中间探索。
             直接输出摘要正文（不要标题不要客套话），中文，控制在 2000 字以内。""";
 
     /** 增量压缩提示词：在旧摘要基础上续压新消息 */
@@ -53,7 +57,9 @@ public class ContextCompressor {
             你是会话压缩器。第一部分是此前对话的旧摘要，第二部分是此后新增的对话（含工具调用记录）。
             请把两者合并成一份更新后的上下文摘要，供助手继续当前任务使用。
             必须保留：任务目标与背景、已完成的关键步骤及其结果、重要的文件路径/命令/配置值、
-            未完成事项与下一步计划、用户明确的偏好或纠正。新增内容里的信息优先保留。
+            未完成事项与下一步计划、用户明确的偏好或纠正。
+            助手已向用户宣布过的结论必须保留并注明状态（已发现/已修复/已验证/已否决）；
+            新增内容里的信息优先保留。
             直接输出合并后的摘要正文（不要标题不要客套话），中文，控制在 2000 字以内。""";
 
     /** 滚动状态：某客户端历史已压缩到的位置 + 已生成的摘要 */
@@ -176,11 +182,22 @@ public class ContextCompressor {
         RollingState st = rolling.get(cl);
         String summary;
         String path = "full";   // 走全量还是增量，用于最终 compressTag
+        boolean reusedSummary = false;
         // 增量命中前提：会话指纹一致（已进 key）+ 消息数单调不减（无 rewind/换会话）+ 尾锚点前缀一致
         boolean sameSession = st != null && st.prefixHash != null
                 && st.segmentEnd <= n && n >= st.msgCount
                 && st.prefixHash.equals(hashOf(messages, st.segmentEnd));
-        if (sameSession && st.segmentEnd < keepFrom) {
+        if (sameSession && keepFrom <= st.segmentEnd) {
+            // 复用：截点没前进（典型=会话尾部横着一段不断生长的超大工具组，keepFrom 被工具组边界
+            // 对齐钉在原地，而 est 每轮仍超阈值）。历史段与上次压缩的完全相同——直接复用旧摘要，
+            // 绝不再付一次全量压缩子调用。2026-11-17 实测：同一会话 3 分钟内 6 连发 117861 token 的
+            // 相同全量压缩（"缓存截点未前进"路径），当天 25 次全量 ≈290 万 token，占压缩子调用
+            // 总烧量的九成——这条分支把这笔流量清零。
+            path = "reuse";
+            reusedSummary = true;
+            summary = st.summary;
+            log.info("[压缩] 截点未前进（keepFrom={} ≤ 已压 {}），复用旧摘要，省一次全量压缩子调用", keepFrom, st.segmentEnd);
+        } else if (sameSession && st.segmentEnd < keepFrom) {
             path = "incremental";
             // 增量：旧摘要 + 上次截点到本次截点之间的新消息（含上次的"保留段"——这次它们成了历史）
             StringBuilder delta = new StringBuilder("【旧摘要】\n").append(st.summary)
@@ -215,31 +232,46 @@ public class ContextCompressor {
             return hardTruncateFallback(req, messages, sysEnd, keepFrom, est, d);
         }
 
-        // 3) 重组：system 段 + 压缩摘要（system 身份注入）+（必要时补回被摘要覆盖的最近 user 指令）+ 保留段
+        // 3) 重组：system 段 + 压缩摘要（system 身份注入）+（必要时补回被摘要覆盖的最近 user 指令）+ 保留段。
+        //    复用分支的保留段从【摘要已覆盖到的位置】(segmentEnd) 开始而不是 keepFrom——
+        //    [keepFrom..segmentEnd) 这段已在旧摘要里，再以原文重复一遍等于叫模型"把做过的事再做一遍"
+        //    （弱模型重复劳动的诱因），且白付一份 token。segmentEnd 本身是当时的对齐截点，
+        //    从它开保留段协议安全（不会以孤儿 tool 开头）。
+        int keptFrom = reusedSummary ? Math.max(keepFrom, st.segmentEnd) : keepFrom;
         List<Object> rebuilt = new ArrayList<>(messages.subList(0, sysEnd));
         Map<String, Object> summaryMsg = new LinkedHashMap<>();
         summaryMsg.put("role", "system");
         summaryMsg.put("content", "以下是本会话此前对话的压缩摘要（较早日志已压缩，最近对话原文保留在后面）：\n" + summary
                 + "\n\n【重要】摘要里列出的只是已完成的步骤，任务本身仍在进行中——"
                 + "请依据“未完成事项/下一步”与最近的对话原文继续推进（该调用工具就发起工具调用），"
-                + "不要因为摘要内容详尽就提前收尾或只回一段总结。");
+                + "不要因为摘要内容详尽就提前收尾或只回一段总结。"
+                + "摘要中标注“已发现/已修复/已验证/已否决”的结论都是已经向用户宣布过的——"
+                + "不要把它们当作新发现重新宣布，也不要在没有新证据时重新验证；"
+                + "直接接着“未完成事项/下一步”干。");
         rebuilt.add(summaryMsg);
-        Map<String, Object> usr = userInstructionIfMissing(messages, keepFrom, n);
+        Map<String, Object> usr = userInstructionIfMissing(messages, keptFrom, n);
         if (usr != null) {
             rebuilt.add(usr);
             log.info("[压缩] 保留段无 user 消息，补回最近一条 user 指令（防上游 400 / 小模型早停）");
         }
-        rebuilt.addAll(messages.subList(keepFrom, n));
+        rebuilt.addAll(messages.subList(keptFrom, n));
         req.put("messages", rebuilt);
 
-        // 4) 更新滚动状态（哈希覆盖到本次截点，下轮请求校验前缀用）
-        RollingState ns = new RollingState();
-        ns.prefixHash = hashOf(messages, keepFrom);
-        ns.summary = summary;
-        ns.segmentEnd = keepFrom;
-        ns.msgCount = n;
-        ns.lastUsedAt = System.currentTimeMillis();
-        rolling.put(cl, ns);
+        // 4) 更新滚动状态（哈希覆盖到本次截点，下轮请求校验前缀用）。
+        //    复用分支例外：锚点不回退（segmentEnd/prefixHash 保持旧值，摘要继续覆盖到原截点），
+        //    只刷新条数与时间戳——否则下轮"增量"会把 [keepFrom..旧截点) 重压进摘要造成摘要重复膨胀。
+        if (reusedSummary) {
+            st.msgCount = n;
+            st.lastUsedAt = System.currentTimeMillis();
+        } else {
+            RollingState ns = new RollingState();
+            ns.prefixHash = hashOf(messages, keepFrom);
+            ns.summary = summary;
+            ns.segmentEnd = keepFrom;
+            ns.msgCount = n;
+            ns.lastUsedAt = System.currentTimeMillis();
+            rolling.put(cl, ns);
+        }
         if (rolling.size() > 64) evictOldest();
 
         int after = RequestCategoryAnalyzer.estimateInputTokens(req);
@@ -249,7 +281,7 @@ public class ContextCompressor {
         //    消息配对）不动，只削文本，保证 token 尽量压回阈值内。
         if (after > threshold && d.getKeepRecentTokens() > 0) {
             int cap = Math.max(1500, d.getKeepRecentTokens() / 4);
-            int keptStart = rebuilt.size() - (n - keepFrom);
+            int keptStart = rebuilt.size() - (n - keptFrom);
             if (shrinkOversizedText(rebuilt, keptStart, cap)) {
                 after = RequestCategoryAnalyzer.estimateInputTokens(req);
                 tag = path + "-ok-shrunk";
@@ -260,7 +292,7 @@ public class ContextCompressor {
                     after / 1000, threshold / 1000);
         }
         log.info("[压缩] 完成：约 {}K → {}K token（阈值 {}K，保留最近 {} 条，压缩模型 {}）",
-                est / 1000, after / 1000, threshold / 1000, n - keepFrom, compressorModel);
+                est / 1000, after / 1000, threshold / 1000, n - keptFrom, compressorModel);
         return new Compressed(req, true, est, after, tag);
     }
 

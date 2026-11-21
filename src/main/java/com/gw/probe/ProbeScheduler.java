@@ -135,6 +135,7 @@ public class ProbeScheduler {
             if (!p.isEnabled()) continue;
             for (String m : p.getStaticModels()) {
                 if (snap.excludedFromAutoAll(p.getId(), m)) continue;       // 图像等专用模型：聊天探测无意义
+                if (!"text".equals(snap.effectiveModality(p.getId(), m))) continue; // 非文本模态（语音等）进不了聊天候选池，探测纯属烧请求次数（2026-11-19）
                 if (snap.effectiveExcludeFromProbe(p.getId(), m)) continue; // 配额硬顶模型：探测会烧掉真实日额度（管理页可勾豁免）
                 if (snap.modelDisabled(p.getId(), m)) continue;             // 已停用的模型不探测（省配额、不产噪音日志）
                 if (!"free".equals(snap.effectiveCostTier(p.getId(), m))) continue;  // 付费模型不为探测花钱

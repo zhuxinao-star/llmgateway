@@ -237,6 +237,13 @@ public class ConfigService {
             return ro != null && Boolean.TRUE.equals(ro.getExcludeFromAutoAll());
         }
 
+        /** 模型模态（text/audio/image/video）：routing 条目 modality；未配置按 text */
+        public String effectiveModality(String providerId, String model) {
+            GatewayConfig.RoutingOverride ro = overrideOf(providerId, model);
+            String m = ro == null ? null : ro.getModality();
+            return m == null || m.isBlank() ? "text" : m.strip().toLowerCase();
+        }
+
         /** 有效代码能力分（0-10）：routing 条目 codeScore；未配置返回 null（不参与 code 加分） */
         public Double effectiveCodeScore(String providerId, String model) {
             GatewayConfig.RoutingOverride ro = overrideOf(providerId, model);

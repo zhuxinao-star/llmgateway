@@ -47,13 +47,15 @@ public class GatewayController {
     private final com.gw.forward.ContextCompressor contextCompressor;
     private final ClientQueueService clientQueueService;
     private final com.gw.policy.RankTraceStore rankTraceStore;
+    private final com.gw.policy.SessionAffinity sessionAffinity;
 
     public GatewayController(ConfigService configService, RouterService routerService,
                             PolicyService policyService, ForwardEngine forwardEngine,
                             HedgedExecutor hedgedExecutor, StatsService statsService,
                             com.gw.forward.ContextCompressor contextCompressor,
                             ClientQueueService clientQueueService,
-                            com.gw.policy.RankTraceStore rankTraceStore) {
+                            com.gw.policy.RankTraceStore rankTraceStore,
+                            com.gw.policy.SessionAffinity sessionAffinity) {
         this.configService = configService;
         this.routerService = routerService;
         this.policyService = policyService;
@@ -63,6 +65,7 @@ public class GatewayController {
         this.contextCompressor = contextCompressor;
         this.clientQueueService = clientQueueService;
         this.rankTraceStore = rankTraceStore;
+        this.sessionAffinity = sessionAffinity;
     }
 
     // ================= /v1/models =================
@@ -111,9 +114,12 @@ public class GatewayController {
         boolean stream = Json.boolVal(req.get("stream"), false);
 
         // ---- 路由解析（模型不存在时回落默认组 free-fast，保证工具侧总有可用模型） ----
-        List<PolicyService.Candidate> candidates = routerService.resolve(model);
+        // 会话指纹必须在压缩【之前】对原始 messages 算——压缩改写 messages 后指纹会漂
+        String affinityKey = sessionAffinity.keyOf(req, client, model);
+        boolean withImageInput = hasImageInput(req);
+        List<PolicyService.Candidate> candidates = routerService.resolve(model, withImageInput);
         if (candidates.isEmpty() && !model.equals(DEFAULT_FALLBACK_MODEL)) {
-            List<PolicyService.Candidate> fb = routerService.resolve(DEFAULT_FALLBACK_MODEL);
+            List<PolicyService.Candidate> fb = routerService.resolve(DEFAULT_FALLBACK_MODEL, withImageInput);
             if (!fb.isEmpty()) {
                 log.warn("模型 {} 不存在，回落默认组 {}", model, DEFAULT_FALLBACK_MODEL);
                 candidates = fb;
@@ -146,6 +152,9 @@ public class GatewayController {
             writeJson(response, openAiError(503, "gateway_error", "所有候选渠道均不可用" + tierHint(strategy) + ": " + model, "no_candidate"));
             return;
         }
+        // 会话粘性：同一会话钉住上次成功的候选（提到队首、failover 链保持原序）。
+        // 分摊抽签管"会话间防赢家通吃"，粘性管"会话内不换脑"——换脑只剩失败/冷却两种
+        ranked = sessionAffinity.apply(affinityKey, ranked);
 
         GatewayConfig.Defaults d = configService.snapshot().config.getDefaults();
         long deadline = System.nanoTime() + (long) d.getTotalBudgetMs() * 1_000_000;
@@ -209,6 +218,11 @@ public class GatewayController {
                     switch (r.kind) {
                         case FAILED -> {
                             policyService.recordFailure(c.providerId(), c.model(), c.channelId(), r.status, r.error, client);
+                            sessionAffinity.recordFailure(affinityKey, c);
+                            // 上下文超长类 400：学得该模型实际上限，下轮路由预过滤——超大请求不再对装不下的模型白烧 attempt
+                            if (r.status == 400 && com.gw.policy.UpstreamErrorClassifier.isContextLengthError(r.error)) {
+                                policyService.learnContextTooLong(c.providerId(), c.model(), estIn);
+                            }
                             // Retry-After 精确冷却：上游给了具体秒数则用它（取与固定冷却的更长值）
                             if ((r.status == 429 || r.status == 503) && r.retryAfterSeconds > 0) {
                                 policyService.recordRateLimitWithRetryAfter(c.providerId(), c.channelId(), r.retryAfterSeconds);
@@ -222,6 +236,7 @@ public class GatewayController {
                         }
                         case SUCCESS -> {
                             // 非流式：一次性返回（对冲只对流式生效，胜者即主选）
+                            sessionAffinity.recordSuccess(affinityKey, c);
                             Map<String, Object> usage = Json.asMap(r.parsedBody.get("usage"));
                             judgeOutputQuality(c, req, r.parsedBody, client, cmp.compressTag());   // 输出质量自反馈（截断/空回复/JSON不合法/早停）
                             response.setStatus(200);
@@ -243,6 +258,7 @@ public class GatewayController {
                         case STREAM -> {
                             // 胜者可能是对冲备选：以 ForwardResult 内身份为准（统计/日志/响应头一致）
                             PolicyService.Candidate winner = winnerOf(r, c);
+                            sessionAffinity.recordSuccess(affinityKey, winner);
                             // #11 并发位一直占到流排空结束（execute 已保留 c 的额度未释放，异常也要还）
                             try {
                                 streamToClient(model, winner, r, attemptNo, profile, client, req, response, cmp.compressTag(), ka, requestStartMs);
@@ -270,7 +286,7 @@ public class GatewayController {
                 List<PolicyService.Scored> reRanked = policyService.rank(candidates, strategy, critical,
                         requestCategory, estIn, RequestCategoryAnalyzer.requiresTools(req), client);
                 if (reRanked.isEmpty()) break;
-                passRanked = reRanked;
+                passRanked = sessionAffinity.apply(affinityKey, reRanked);
             }
 
             // ---- 候选穷尽：透传最后上游错误（真实 HTTP 状态码，供工具退避重试）。
@@ -989,6 +1005,26 @@ public class GatewayController {
         return "free-only".equals(strategy) ? "（当前策略只走免费模型，无免费候选可用——按你的要求不付费兜底，允许失败）"
                 : "paid-only".equals(strategy) ? "（当前策略只走付费模型，无付费候选可用）"
                 : "（熔断/冷却/禁用/预算耗尽）";
+    }
+
+    /**
+     * 请求是否带图片输入（OpenAI 格式：content 数组里的 image_url 分段）。
+     * 给 autoAll 展开用：modality=image 的模型仅在真带图时进候选池。
+     */
+    static boolean hasImageInput(Map<String, Object> req) {
+        List<?> messages = com.gw.provider.adaptor.Json.asList(req.get("messages"));
+        if (messages == null) return false;
+        for (Object o : messages) {
+            Map<String, Object> m = com.gw.provider.adaptor.Json.asMap(o);
+            if (m == null) continue;
+            Object c = m.get("content");
+            if (!(c instanceof List<?> parts)) continue;
+            for (Object p : parts) {
+                Map<String, Object> pm = com.gw.provider.adaptor.Json.asMap(p);
+                if (pm != null && (pm.get("image_url") != null || "image_url".equals(pm.get("type")))) return true;
+            }
+        }
+        return false;
     }
 
     static ResponseEntity<Map<String, Object>> openAiError(int status, String type, String message, String code) {

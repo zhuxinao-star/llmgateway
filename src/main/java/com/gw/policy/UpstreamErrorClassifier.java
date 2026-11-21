@@ -42,7 +42,8 @@ public final class UpstreamErrorClassifier {
     /** 小写化后匹配的关键字表（按语义优先级分组，命中顺序即返回顺序）。
      *  刻意覆盖 logs 实测的"文字型限流"：tpm/rpm limit、1305、50609、concurrency limit、访问量过大。 */
     private static final String[] QUOTA_KEYS = {
-            "insufficient_quota", "insufficient balance", "quota exceeded", "余额不足", "exceeded your current quota"};
+            "insufficient_quota", "insufficient balance", "quota exceeded", "余额不足", "exceeded your current quota",
+            "overdue", "欠费"};   // overdue：2026-11-17 实测 "apikey status is overdue"（余额过期挂掉的 key）
     private static final String[] RATE_LIMIT_KEYS = {
             "rate_limit_error", "rate limit", "tpm/rpm limit", "request limit[", "requests within",
             "concurrency limit", "too many requests", "throttling", "访问量过大", "限流", "频繁"};
@@ -69,16 +70,33 @@ public final class UpstreamErrorClassifier {
     }
 
     /**
+     * 仅按文本判定"输入/上下文超长"（不含 HTTP 兜底）——供窗口学习层使用。
+     * 普通参数 400 的 HTTP 兜底也归 CONTEXT_TOO_LONG，但不能拿来学窗口（会学错），
+     * 所以这里只认文本语义；max_tokens 类输出预算错误显式排除（那是 ParamHealer 的地盘）。
+     * 实测样本：zhipu "Prompt exceeds max length"（CONTEXT_TOO_LONG_KEYS 没盖住，靠 max length 补）。
+     */
+    public static boolean isContextLengthError(String error) {
+        if (error == null || error.isBlank()) return false;
+        String low = error.toLowerCase();
+        if (low.contains("max_tokens") || low.contains("max tokens")) return false;
+        return containsAny(low, CONTEXT_TOO_LONG_KEYS)
+                || low.contains("max length") || low.contains("exceeds max");
+    }
+
+    /**
      * "模型已下线"话术兜底：部分上游（如 AMD）用 HTTP 400 + "Requested model X not supported"、
-     * 或 "Model X is not available" 表达"模型不存在"，但既不含 MODEL_NOT_SUPPORTED_KEYS 的固定短语，
-     * 状态码又是 400（会被下面兜底误判成 CONTEXT_TOO_LONG）。要求同时出现 "model" 与
-     * "not supported / not available" 才判模型不存在——避免把"function calling not supported"这类
-     * 特性不支持（不含 model 主语）误伤。
+     * 或 "Model X is not available"、或 "Model X was disabled on ..." 表达"模型不存在/已停用"，
+     * 但既不含 MODEL_NOT_SUPPORTED_KEYS 的固定短语，状态码又是 400（会被下面兜底误判成
+     * CONTEXT_TOO_LONG——2026-11-17 实测被禁用的 vision 模型整场被反复白撞 5 次）。
+     * 要求同时出现 "model" 与 "not supported / not available / disabled" 才判模型不存在——
+     * 避免把"function calling not supported"这类特性不支持（不含 model 主语）误伤。
      */
     private static boolean isModelGonePhrasing(String low) {
-        if (!low.contains("model")) return false;
+        if (!low.contains("model") && !low.contains("模型")) return false;
         return low.contains("not supported") || low.contains("not_supported")
-                || low.contains("not available") || low.contains("not_available");
+                || low.contains("not available") || low.contains("not_available")
+                || low.contains("was disabled") || low.contains("has been disabled")
+                || low.contains("is disabled") || low.contains("已停用") || low.contains("已下线");
     }
 
     /**

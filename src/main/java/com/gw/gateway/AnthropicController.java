@@ -48,13 +48,15 @@ public class AnthropicController {
     private final ContextCompressor contextCompressor;
     private final ClientQueueService clientQueueService;
     private final com.gw.policy.RankTraceStore rankTraceStore;
+    private final com.gw.policy.SessionAffinity sessionAffinity;
 
     public AnthropicController(ConfigService configService, RouterService routerService,
                                 PolicyService policyService, ForwardEngine forwardEngine,
                                 HedgedExecutor hedgedExecutor, StatsService statsService,
                                 GatewayController gatewayController, ContextCompressor contextCompressor,
                                 ClientQueueService clientQueueService,
-                                com.gw.policy.RankTraceStore rankTraceStore) {
+                                com.gw.policy.RankTraceStore rankTraceStore,
+                                com.gw.policy.SessionAffinity sessionAffinity) {
         this.configService = configService;
         this.routerService = routerService;
         this.policyService = policyService;
@@ -65,6 +67,7 @@ public class AnthropicController {
         this.contextCompressor = contextCompressor;
         this.clientQueueService = clientQueueService;
         this.rankTraceStore = rankTraceStore;
+        this.sessionAffinity = sessionAffinity;
     }
 
     /** Anthropic 风格错误响应 */
@@ -150,10 +153,13 @@ public class AnthropicController {
         // 注：model 字段保留原始名（供路由解析），转发层会替换为各候选的真实模型名
         openAiReq.put("model", model);
 
-        List<PolicyService.Candidate> candidates = routerService.resolve(model);
+        // 会话指纹在压缩【之前】对原始 messages 算（压缩改写 messages 后指纹会漂）
+        String affinityKey = sessionAffinity.keyOf(openAiReq, client, model);
+        boolean withImageInput = GatewayController.hasImageInput(openAiReq);
+        List<PolicyService.Candidate> candidates = routerService.resolve(model, withImageInput);
         // 模型不存在时回落默认组 free-fast（Claude Code 配置一次即可）
         if (candidates.isEmpty() && !model.equals(DEFAULT_FALLBACK_MODEL)) {
-            List<PolicyService.Candidate> fb = routerService.resolve(DEFAULT_FALLBACK_MODEL);
+            List<PolicyService.Candidate> fb = routerService.resolve(DEFAULT_FALLBACK_MODEL, withImageInput);
             if (!fb.isEmpty()) {
                 log.warn("[anthropic] 模型 {} 不存在，回落默认组 {}", model, DEFAULT_FALLBACK_MODEL);
                 candidates = fb;
@@ -181,6 +187,8 @@ public class AnthropicController {
                     "所有候选渠道均不可用" + GatewayController.tierHint(strategy) + ": " + model);
             return;
         }
+        // 会话粘性（同 OpenAI 端点）：会话内不换脑，换脑只剩失败/冷却两种
+        ranked = sessionAffinity.apply(affinityKey, ranked);
 
         GatewayConfig.Defaults d = configService.snapshot().config.getDefaults();
         long deadline = System.nanoTime() + (long) d.getTotalBudgetMs() * 1_000_000;
@@ -239,6 +247,11 @@ public class AnthropicController {
                     switch (r.kind) {
                         case FAILED -> {
                             policyService.recordFailure(c.providerId(), c.model(), c.channelId(), r.status, r.error, client);
+                            sessionAffinity.recordFailure(affinityKey, c);
+                            // 上下文超长类 400：学得该模型实际上限，下轮路由预过滤（同 OpenAI 端点）
+                            if (r.status == 400 && com.gw.policy.UpstreamErrorClassifier.isContextLengthError(r.error)) {
+                                policyService.learnContextTooLong(c.providerId(), c.model(), estIn);
+                            }
                             // Retry-After 精确冷却（同 OpenAI 端点）
                             if ((r.status == 429 || r.status == 503) && r.retryAfterSeconds > 0) {
                                 policyService.recordRateLimitWithRetryAfter(c.providerId(), c.channelId(), r.retryAfterSeconds);
@@ -252,6 +265,7 @@ public class AnthropicController {
                         }
                         case SUCCESS -> {
                             // OpenAI 响应 → Anthropic 响应
+                            sessionAffinity.recordSuccess(affinityKey, c);
                             Map<String, Object> usage = Json.asMap(r.parsedBody.get("usage"));
                             judgeOutputQuality(c, openAiReq, r.parsedBody, client, cmp.compressTag());   // 输出质量自反馈（同 OpenAI 端点）
                             Map<String, Object> anthropicResp = AnthropicConverter.openaiResponseToAnthropic(r.parsedBody, model);
@@ -273,6 +287,7 @@ public class AnthropicController {
                         case STREAM -> {
                             // 胜者可能是对冲备选：以 ForwardResult 内身份为准
                             PolicyService.Candidate winner = winnerOf(r, c);
+                            sessionAffinity.recordSuccess(affinityKey, winner);
                             // #11 并发位一直占到流排空结束（execute 已保留 c 的额度未释放，异常也要还）
                             try {
                                 streamToClient(model, winner, r, attemptNo, profile, client, openAiReq, response, cmp.compressTag(), ka, requestStartMs);
@@ -299,7 +314,7 @@ public class AnthropicController {
                 List<PolicyService.Scored> reRanked = policyService.rank(candidates, strategy, critical,
                         requestCategory, estIn, RequestCategoryAnalyzer.requiresTools(openAiReq), client);
                 if (reRanked.isEmpty()) break;
-                passRanked = reRanked;
+                passRanked = sessionAffinity.apply(affinityKey, reRanked);
             }
             // ---- 候选穷尽：透传最后上游错误（真实 HTTP 状态码，供工具退避重试）。
             //  走到这里说明没有任何候选返回 STREAM，ka 尚未 commit，状态码/响应头仍可写。 ----

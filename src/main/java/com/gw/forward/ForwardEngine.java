@@ -41,17 +41,20 @@ public class ForwardEngine {
     private final PolicyService policyService;
     private final AdaptorRegistry adaptorRegistry;
     private final ProviderClients providerClients;
+    private final ParamHealer paramHealer;
 
     /** 非流式 body 阻塞读放虚拟线程任务里跑，主线程用 Future.get(剩余预算) 实现精确超时 */
     private final ExecutorService bodyReads = Executors.newThreadPerTaskExecutor(
             Thread.ofVirtual().name("gw-body-", 0).factory());
 
     public ForwardEngine(ConfigService configService, PolicyService policyService,
-                         AdaptorRegistry adaptorRegistry, ProviderClients providerClients) {
+                         AdaptorRegistry adaptorRegistry, ProviderClients providerClients,
+                         ParamHealer paramHealer) {
         this.configService = configService;
         this.policyService = policyService;
         this.adaptorRegistry = adaptorRegistry;
         this.providerClients = providerClients;
+        this.paramHealer = paramHealer;
     }
 
     private HttpClient clientFor(GatewayConfig.Provider p) {
@@ -116,7 +119,8 @@ public class ForwardEngine {
      */
     public ForwardResult execute(Map<String, Object> openAiRequest, PolicyService.Candidate candidate,
                                  boolean stream, long deadlineNanos) {
-        return execute(openAiRequest, candidate, stream, deadlineNanos, 0);
+        return dispatch(openAiRequest, candidate, stream, deadlineNanos, 0, false,
+                ParamHealer.MAX_HEALS_PER_CALL);
     }
 
     /**
@@ -126,16 +130,20 @@ public class ForwardEngine {
      */
     public ForwardResult execute(Map<String, Object> openAiRequest, PolicyService.Candidate candidate,
                                  boolean stream, long deadlineNanos, int channelBudgetMsOverride) {
-        return execute(openAiRequest, candidate, stream, deadlineNanos, channelBudgetMsOverride, false);
+        return dispatch(openAiRequest, candidate, stream, deadlineNanos, channelBudgetMsOverride, false,
+                ParamHealer.MAX_HEALS_PER_CALL);
     }
 
     /**
+     * 单候选一次转发的主实现（公开入口见上方 execute 重载；递归自愈重试也走这里）。
      * @param forceDisableThinking 撞上"该家默认开思考、要求回传 reasoning_content"时的自愈重试：
      *   对本次未列入实测名单的渠道也注通用关思考开关，对同一候选原样重发一次。
+     * @param healsLeft 参数形状自愈的剩余次数（reasoning_effort 组合冲突 / max_tokens 超上限，
+     *   详见 {@link ParamHealer}；0=不再自愈，防自愈重试自身再 400 时无限空转）
      */
-    private ForwardResult execute(Map<String, Object> openAiRequest, PolicyService.Candidate candidate,
-                                  boolean stream, long deadlineNanos, int channelBudgetMsOverride,
-                                  boolean forceDisableThinking) {
+    private ForwardResult dispatch(Map<String, Object> openAiRequest, PolicyService.Candidate candidate,
+                                   boolean stream, long deadlineNanos, int channelBudgetMsOverride,
+                                   boolean forceDisableThinking, int healsLeft) {
         ConfigService.Snapshot snap = configService.snapshot();
         GatewayConfig.Defaults d = snap.config.getDefaults();
         GatewayConfig.Provider p = snap.providersById.get(candidate.providerId());
@@ -143,6 +151,10 @@ public class ForwardEngine {
         GatewayConfig.Channel ch = null;
         for (GatewayConfig.Channel c : p.getChannels()) if (c.getId().equals(candidate.channelId())) ch = c;
         if (ch == null) return failed(0, "channel 配置缺失", false);
+
+        // 参数自愈的预适配：该家学过"拒绝哪些参数/上限多少"就直接按学习口径改写后再发
+        //（没有学习记录时原引用透传，零拷贝零行为变化）
+        openAiRequest = paramHealer.preAdapt(candidate.providerId(), candidate.model(), openAiRequest);
 
         ProtocolAdaptor adaptor = adaptorRegistry.create(p.getProtocol());
 
@@ -218,10 +230,26 @@ public class ForwardEngine {
                         == UpstreamErrorClassifier.ErrorClass.REASONING_PASSBACK) {
                 log.warn("[思考回传] {}/{} 要求历史回传 reasoning_content，已关思考重发一次",
                         candidate.providerId(), candidate.model());
-                ForwardResult retry = execute(openAiRequest, candidate, stream, deadlineNanos,
-                        channelBudgetMsOverride, true);
+                ForwardResult retry = dispatch(openAiRequest, candidate, stream, deadlineNanos,
+                        channelBudgetMsOverride, true, healsLeft);
                 if (retry.kind != ForwardResult.Kind.FAILED) return retry;
                 // 重发仍失败：回吐原始 400（那才是稳定可解释的那一句），不掩盖
+            }
+            // 自愈二：参数形状与该家不兼容（reasoning_effort 组合冲突 / max_tokens 超平台上限）。
+            // 错在参数不在渠道健康——学下口径、对同一候选改写后重试一次，而不是把同形状的参数
+            // 原样撞向下一家再烧一个 attempt（2026-11-17 实测两类各白烧十几次）。
+            if (status == 400 && healsLeft > 0) {
+                ParamHealer.Heal heal = ParamHealer.detectHeal(errBody);
+                if (heal != null) {
+                    Map<String, Object> rewritten = paramHealer.learnAndApply(
+                            candidate.providerId(), candidate.model(), openAiRequest, heal);
+                    log.warn("[参数自愈] {}/{} 400 参数形状冲突，已按学习口径改写请求同候选重试",
+                            candidate.providerId(), candidate.model());
+                    ForwardResult retry = dispatch(rewritten, candidate, stream, deadlineNanos,
+                            channelBudgetMsOverride, forceDisableThinking, healsLeft - 1);
+                    if (retry.kind != ForwardResult.Kind.FAILED) return retry;
+                    // 重试仍失败：回吐原始 400（稳定可解释的那句）
+                }
             }
             return failed;
         }

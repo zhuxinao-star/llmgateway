@@ -112,6 +112,46 @@ public class PolicyService {
         return out;
     }
 
+    // ---- 学到的上下文窗口（上游"输入超长"拒绝 → 路由预过滤）----
+    // 大多数模型没配 contextWindow，超大请求对它们必 400 白烧一个 attempt（2026-09-13 实测
+    // zhipu glm-4.5 对 152K 请求连烧 3 个）。上游用"Prompt exceeds max length"拒绝的那一刻，
+    // 就等于宣布了"我的窗口 < 这发输入"——按 min 收敛记下来，rank 在配置窗口缺失时用它预过滤。
+    // 内存态，重启清零（最多白学一轮）；删除供应商/模型时随 clearRuntime/clearEntry 清掉。
+    static final class LearnedWindows {
+        /** 低于这个规模的拒绝不学（防止把某个无关 400 学成"窗口只有几百 token"把模型永久过滤掉） */
+        static final long MIN_LEARNABLE_TOKENS = 200;
+        private final ConcurrentHashMap<String, Long> byKey = new ConcurrentHashMap<>();
+        void learn(String providerId, String model, long rejectedInputTokens) {
+            if (providerId == null || model == null || rejectedInputTokens <= MIN_LEARNABLE_TOKENS) return;
+            byKey.merge(providerId + "\n" + model, rejectedInputTokens - 1, Math::min);
+        }
+        /** 学到的窗口上限；没学过返回 -1（视为不限，交给配置或上游自己判） */
+        long ceiling(String providerId, String model) {
+            Long v = byKey.get(providerId + "\n" + model);
+            return v == null ? -1 : v;
+        }
+        void clearProvider(String providerId) {
+            if (providerId == null) return;
+            byKey.keySet().removeIf(k -> k.startsWith(providerId + "\n"));
+        }
+        void clear(String providerId, String model) {
+            if (providerId == null || model == null) return;
+            byKey.remove(providerId + "\n" + model);
+        }
+        int size() { return byKey.size(); }
+    }
+    private final LearnedWindows learnedWindows = new LearnedWindows();
+
+    /** 上游以"输入/上下文超长"拒绝了这发约 estTokens 的输入 → 学得该模型窗口 < estTokens（路由预过滤用） */
+    public void learnContextTooLong(String providerId, String model, int estTokens) {
+        learnedWindows.learn(providerId, model, estTokens);
+    }
+
+    /** 学到的窗口上限（诊断展示用）；-1=没学过 */
+    public long learnedContextWindow(String providerId, String model) {
+        return learnedWindows.ceiling(providerId, model);
+    }
+
     // ---- 早停嫌疑（client×provider×model → 惩罚截止时间戳）----
     // 带 tools 的请求若"经历过压缩 + 回复极短 + 无 tool_calls"，高度疑似静默早停
     //（agent 会误以为任务完成直接收尾）。命中后该 client 对该模型 10 分钟内额外 ×0.5 降权
@@ -253,6 +293,7 @@ public class PolicyService {
         inflightEntry.keySet().removeIf(k -> k.startsWith(prefix));
         inflightProvider.remove(providerId);
         rateLimiter.reset(providerId);
+        learnedWindows.clearProvider(providerId);
         String esInfix = "\n" + providerId + "\n";
         earlyStopPenalty.keySet().removeIf(k -> k.contains(esInfix));
         log.info("已清理 provider={} 的运行时状态（熔断/EWMA/冷却/限流学习）", providerId);
@@ -265,6 +306,7 @@ public class PolicyService {
         usage.remove(entryKey(providerId, model));
         inflightEntry.remove(entryKey(providerId, model));
         rateLimiter.removeOutputBudget(providerId, model);
+        learnedWindows.clear(providerId, model);
         String esSuffix = "\n" + providerId + "\n" + model;
         earlyStopPenalty.keySet().removeIf(k -> k.endsWith(esSuffix));
         log.info("已清理 {}/{} 的运行时状态", providerId, model);
@@ -368,11 +410,16 @@ public class PolicyService {
                 }
             }
             // 上下文超限的模型直接出局（配置了 contextWindow 且请求估算超过）。留 1.1 倍余量：
-            // 估算是粗略的（字符数/4），贴边上限的让上游自己判
+            // 估算是粗略的（字符数/4），贴边上限的让上游自己判。
+            // 配置缺失时用学到的窗口（上游"输入超长"拒绝学得）——超大请求不再对装不下的模型白烧 attempt
             Integer cw = snap.effectiveContextWindow(c.providerId, c.model());
+            if (cw == null) {
+                long lw = learnedWindows.ceiling(c.providerId, c.model());
+                if (lw > 0) cw = (int) Math.min(lw, Integer.MAX_VALUE);
+            }
             if (inputTokens != null && cw != null && inputTokens > cw * 1.1) {
                 recordFiltered(out, c, "CONTEXT_TOO_LARGE", "请求约 " + inputTokens + " token 超过该模型上下文 "
-                        + cw + "，必被上游拒绝，不参与评分");
+                        + cw + "（配置或从上游拒绝学得），必被上游拒绝，不参与评分");
                 continue;
             }
             ChannelRuntime cr = channel(c.providerId, c.channelId());

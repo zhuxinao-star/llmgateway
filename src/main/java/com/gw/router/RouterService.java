@@ -32,6 +32,15 @@ public class RouterService {
      * @return 候选；空 = model 不存在
      */
     public List<PolicyService.Candidate> resolve(String requestedModel) {
+        return resolve(requestedModel, false);
+    }
+
+    /**
+     * @param withImageInput 请求是否带图片输入：autoAll 展开时 modality=image 的模型仅在此为 true 时放行。
+     *                        audio 恒不进聊天候选（语音模型答聊天必跑偏，2026-11-17 实测被抽签选中 29 轮）。
+     *                        点名 provider/model 与组内显式成员不受此过滤约束。
+     */
+    public List<PolicyService.Candidate> resolve(String requestedModel, boolean withImageInput) {
         ConfigService.Snapshot snap = configService.snapshot();
         if (requestedModel == null || requestedModel.isBlank()) return List.of();
         // 大小写归一：Claude Code 等客户端偶尔大小写不一致，精确匹配失败会落进"模型不存在→默认组"
@@ -66,11 +75,20 @@ public class RouterService {
                 if (g.isAutoAll()) {
                     // 自动组：所有启用供应商的全部手工配置模型（static-models），
                     // 组内优先级沿用路由覆盖值（无覆盖则用供应商基础值），免费/快者自然排前。
-                    // excludeFromAutoAll 的条目跳过（图像端点专用模型聊天必失败，不进聊天候选池）
+                    // excludeFromAutoAll 的条目跳过（图像端点专用模型聊天必失败，不进聊天候选池）。
+                    // 模态过滤（组卫生）：audio/video 恒排除；image 仅当请求真带图时放行——
+                    // 防止语音/图像模型被抽签选中去答纯文本聊天
                     for (GatewayConfig.Provider p : snap.config.getProviders()) {
                         if (!p.isEnabled()) continue;
                         for (String m : p.getStaticModels()) {
                             if (snap.excludedFromAutoAll(p.getId(), m)) continue;
+                            String mod = snap.effectiveModality(p.getId(), m);
+                            boolean modalityOk = switch (mod) {
+                                case "audio", "video" -> false;
+                                case "image" -> withImageInput;
+                                default -> true;
+                            };
+                            if (!modalityOk) continue;
                             out.addAll(candidatesFor(snap, p.getId(), m, null));
                         }
                     }

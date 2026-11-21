@@ -138,6 +138,9 @@ public class GatewayConfig {
         private String category;  // 擅长类别（code/doc/translate/analysis/general…）——语义路由匹配用
         private Integer contextWindow;  // 上下文上限（token）——请求输入超限时跳过该模型，省白烧 attempt
         private Boolean excludeFromAutoAll;  // true = 不进 autoAll 自动组（图像/视频端点专用模型：聊天请求打到它必失败）
+        private String modality;     // 模态标记：text（默认）/audio/image/video。非 text 的模型不进 autoAll 聊天候选池
+                                     //（audio 恒排除——语音模型答聊天必跑偏；image 仅当请求真带图时放行），
+                                     // 点名 provider/model 不受限。2026-11-17 实测：stepaudio 语音模型在代码会话里被抽签选中 29 轮
         private Double codeScore;    // 代码能力分 0-10（语义路由 code 场景用；null=未打分不参与）
         private Double userWeight;   // 用户自定义权重 0.1-10（乘法进评分；null=1.0 中性）
         private Boolean toolWeak;    // true=工具调用能力弱：带 tools 的请求评分降权（不剔除，只排后）
@@ -165,6 +168,8 @@ public class GatewayConfig {
         public void setContextWindow(Integer v) { this.contextWindow = v; }
         public Boolean getExcludeFromAutoAll() { return excludeFromAutoAll; }
         public void setExcludeFromAutoAll(Boolean v) { this.excludeFromAutoAll = v; }
+        public String getModality() { return modality; }
+        public void setModality(String v) { this.modality = v; }
         public Double getCodeScore() { return codeScore; }
         public void setCodeScore(Double v) { this.codeScore = v; }
         public Double getUserWeight() { return userWeight; }
@@ -240,9 +245,13 @@ public class GatewayConfig {
         private int hedgeMaxContextTokens = 10000;  // 输入超过此 token 数禁用对冲（双发=双倍 TPM，大请求纯串行 failover）
         private int contextCompressThresholdTokens = 0;  // 上下文自动压缩阈值（token，0=关闭）：超过时网关先把历史压成摘要再转发
         private String contextCompressModel;  // 压缩模型（组名或 provider/model 点名）；null=压缩功能关闭
-        private int keepRecentMessages = 15;  // 压缩时保留最近 N 条消息原文（其余压成摘要）
-        private int keepRecentTokens = 16000; // 压缩保留段 token 预算（0=只看条数）：从最近往前累加，超预算就不再往前扩——
+        private int keepRecentMessages = 30;  // 压缩时保留最近 N 条消息原文（其余压成摘要）。
+                                              // 2026-11-18 15→30：保留段越宽，模型自己的"宣布过什么"越多以原文存活——
+                                              // 摘要失忆（重复宣布"找到问题了"）的主 mitigator 之一
+        private int keepRecentTokens = 24000; // 压缩保留段 token 预算（0=只看条数）：从最近往前累加，超预算就不再往前扩——
                                               // 少数超大消息（工具输出动辄几万 token）场景下按条数保留压不到阈值下（实测 91K→71K 仍超）
+        private boolean sessionAffinityEnabled = true;  // 会话粘性路由：同一会话钉住上次成功的候选，换脑只发生在失败/冷却时。
+                                                        // 关闭后回落纯抽签轮转（2026-11-17 实测 115 轮被 8+ 家轮流作答导致重复宣布）
         private int probeIntervalMinutes = 30;      // 定时探测间隔（分钟，0=关闭）：空闲模型定期发 1 token 探测
         private int probeMaxTokens = 8;             // 每次探测的 max_tokens（probe 只测连通/首字速度，产 token 越少越省）
         private int clientMaxConcurrency = 2;       // 同一接入工具(client)的最大并发转发数：超并发排队等上一个完成（0=关闭）
@@ -312,6 +321,9 @@ public class GatewayConfig {
 
         public int getKeepRecentTokens() { return keepRecentTokens; }
         public void setKeepRecentTokens(int v) { this.keepRecentTokens = v; }
+
+        public boolean isSessionAffinityEnabled() { return sessionAffinityEnabled; }
+        public void setSessionAffinityEnabled(boolean v) { this.sessionAffinityEnabled = v; }
 
         public boolean isCatalogDiscovery() { return catalogDiscovery; }
         public void setCatalogDiscovery(boolean v) { this.catalogDiscovery = v; }
